@@ -1,0 +1,17 @@
+python ./pycbc_brute_bank \
+    --verbose \
+    --minimal-match 0.8 \
+    --tolerance .05 \
+    --buffer-length 2592000 \
+    --sample-rate .2 \
+    --approximant BBHX_PhenomD \
+    --tau0-threshold 100000 \
+    --tau0-crawl 20000000 \
+    --tau0-start 0 \
+    --tau0-end  20000000 \
+    --tau0-cutoff-frequency 0.0001 \
+    --input-config config.ini \
+    --seed 1 \
+    --output-file output/lisa_bank_full.hdf \
+    --psd-file ../psd_estimation/A_sangria_hm_SMOOTHED_PSD.txt \
+    --low-frequency-cutoff .000001
