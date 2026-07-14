@@ -13,14 +13,11 @@ from matplotlib import pyplot as plt
 # Import specific modules from the PyCBC library
 import pycbc
 import pycbc.psd
-from pycbc.events.threshold_cpu import parallel_thresh_cluster
 from pycbc.types import TimeSeries
 # I am not sure if we need to remove these if people are so against PyCBC's licence
-
-import ldc.io.hdf5 as hdfio
+from scipy.signal import find_peaks
 
 from search_utils import (
-    load_sangria_timeseries,
     waveform_from_bank,
 )
 
@@ -113,8 +110,7 @@ parser.add_argument(
 
 parser.add_argument(
     "--testing-plots",
-    action='store_true',
-    help="Generate plots used for testing"
+    help="Generate plots used for testing in this directory"
 )
 
 # Parse the command-line arguments provided by the user
@@ -131,13 +127,16 @@ else:
 # First, load in the data. Get from the file the information on when it starts, its length and its delta t
 # For now, this uses the sangria dataset, but we want to build a more sophisticated "get data" function, so that
 # we can take in e.g. mojito datasets
-data = load_sangria_timeseries(
-    args.input_data_file,
-)
-data = data[args.channel]
+with h5py.File(args.input_data_file, 'r') as data_file:
+    data_epoch = data_file.attrs['epoch']
+    delta_t = data_file.attrs['delta_t']
+    data = TimeSeries(
+        data_file[args.channel][:],
+        delta_t=delta_t,
+        epoch=data_epoch,
+    )
+    padding_duration = data_file.attrs['data_padding_duration']
 
-data_epoch = data._epoch
-delta_t = data.delta_t
 original_dlen = len(data)
 tlen = original_dlen * delta_t
 delta_f = 1. / tlen
@@ -146,9 +145,12 @@ flen = tlen // 2 + 1
 data_start_time = float(data._epoch)
 data_end_time = data_start_time + tlen
 
-logger.info(f'Data from {data_start_time:.0f} to {data_end_time:.0f}')
+logger.info(f'Data from {data_start_time:.0f} to {data_end_time:.0f} (including padding)')
 logger.debug("Original data length: %d", original_dlen)
+padding_samples = int(padding_duration / delta_t)
 
+valid_data_start = max(args.start_time, data_start_time + padding_duration)
+valid_data_end = min(args.end_time, data_end_time + padding_duration)
 
 # Set the defaults required for the waveform parameters
 waveform_params_shared = {
@@ -164,35 +166,6 @@ waveform_params_shared = {
     'mode_array':  [(2,2)],
     'length': flen,
 }
-
-# subtracting the mean - I _think_ we want to do this, not 100% sure.
-# This is probbaly useful for parallelilsing in time
-mean_val = np.mean(data)
-data = data - mean_val
-
-# Plot the data:
-if args.testing_plots is not None:
-    fig, ax = plt.subplots()
-    ax.plot((data.sample_times - data_start_time) / 86400, data, label=f"data {args.channel}")
-    ax.legend(loc='upper right')
-    ax.set_xlim(0, tlen / 86400)
-    ax.set_xlabel('Time from epoch (days)')
-
-    fig.savefig('output/data.png')
-    plt.close(fig)
-
-
-padding_time = 30 * 86400 # 30 days in seconds
-padding_samples = int(padding_time / delta_t)
-
-logger.info("Padding data with %d samples at start and end", padding_samples)
-padded_data = pycbc.types.TimeSeries(
-    np.zeros(len(data) + 2 * padding_samples, dtype=data.dtype),
-    delta_t=data.delta_t,
-    epoch=data._epoch - padding_time
-)
-padded_data[padding_samples:-padding_samples] = data
-data = padded_data
 
 # Ensure data has an odd length to avoid FFT length mismatches
 if len(data) % 2 == 0:
@@ -212,6 +185,18 @@ psd = pycbc.psd.from_txt(
     is_asd_file=False,
 )
 
+# To avoid a division by zero error in the matched filter, we set the
+# low frequency bins of the PSD to infinity.
+psd.data[0] = np.inf
+psd.data[1] = np.inf
+
+if args.testing_plots is not None:
+    whitened_data = (data.to_frequencyseries() / psd).to_timeseries()
+    fig, ax = plt.subplots()
+    ax.plot(whitened_data.sample_times, whitened_data, label=f"whitened data {args.channel}")
+    ax.legend(loc='upper right')
+    fig.savefig(f'{args.testing_plots}/whitened_data_{args.channel}.png')
+    plt.close(fig)
 
 logger.info(f"Beginning filtering with bank %s", args.bank_file)
 
@@ -251,34 +236,26 @@ with h5py.File(args.bank_file, 'r') as bank_file:
 
         # Zero out the corrupted data at the start and end of the time series
         # so that we don't find any triggers there
+
         start_idx = padding_samples
         end_idx = len(snr_ts) - padding_samples
         snr_ts_data = snr_ts.data.copy()
         snr_ts_data[0:start_idx] = 0
         snr_ts_data[end_idx:] = 0
+        snr_ts.data = snr_ts_data
         
-        # Now do the findchirp-style clustering on the full timeseries
-        n_triggers = len(snr_ts_data)
-        snrs_out = np.zeros(n_triggers, dtype=np.complex64)
-        indices_out = np.zeros(n_triggers, dtype=np.uint32)
-
-        cluster_out = parallel_thresh_cluster(
-            snr_ts_data.astype(np.complex64),
-            n_triggers,
-            snrs_out,
-            indices_out,
-            np.float32(args.snr_threshold),
-            np.uint32(args.cluster_window // delta_t),
-            len(snr_ts_data),  # segment size - this is just the whole timeseries
+        # Find peaks in the SNR timeseries
+        clustered_indices, _ = find_peaks(
+            abs(snr_ts.data),
+            height=args.snr_threshold,
+            distance=int(args.cluster_window / delta_t)
         )
 
-        clustered_indices = indices_out[:cluster_out]
-        snrs_out = abs(snr_ts_data[clustered_indices])
+        snrs_out = abs(snr_ts.data[clustered_indices])
         times_out = snr_ts.sample_times[clustered_indices]
+        logger.debug("%d triggers remain after clustering", len(clustered_indices))
 
-        logger.debug("%d triggers remain after clustering", cluster_out)
-
-        if args.testing_plots:
+        if args.testing_plots is not None:
             fig, ax = plt.subplots()
             ax.plot(snr_ts.sample_times / 86400, abs(snr_ts.data))
             ax.scatter(
@@ -286,13 +263,14 @@ with h5py.File(args.bank_file, 'r') as bank_file:
                 snrs_out,
                 c='y',
                 marker='*',
+                zorder=50,
             )
             ax.set_xlabel('Time (days)')
             ax.set_ylabel('SNR')
-            fig.savefig(f'output/snr_ts_{args.channel}.png')
+            fig.savefig(f'{args.testing_plots}/snr_timeseries_{args.channel}_{template_idx}.png')
             plt.close(fig)
 
-        output_triggers['template_id'] += [template_idx] * cluster_out
+        output_triggers['template_id'] += [template_idx] * len(clustered_indices)
         output_triggers['end_time'] += times_out.tolist()
         output_triggers['snr'] += snrs_out.tolist()
 

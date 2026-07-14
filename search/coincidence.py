@@ -8,8 +8,8 @@ use('Agg')
 from matplotlib import pyplot as plt
 
 import pycbc
+from scipy.signal import find_peaks
 from pycbc.types import MultiDetOptionAction  # Custom action for argparse
-from pycbc.events.threshold_cpu import parallel_thresh_cluster
 
 parser = argparse.ArgumentParser()
 
@@ -25,7 +25,7 @@ parser.add_argument(
 parser.add_argument(
     "--coincidence-window",
     type=float,
-    default=3600,
+    default=7200,
     help="Window to use when assessing coincidence, in seconds. Default 100"
 )
 parser.add_argument(
@@ -34,16 +34,8 @@ parser.add_argument(
     help="File to store output peaks in SNR"
 )
 parser.add_argument(
-    "--num-timeslides",
-    type=int,
-    default=0,
-    help="Number of timeslides to perform on each side of zero lag. "
-         "Each slide is one coincidence window."
-)
-parser.add_argument(
     "--testing-plots",
-    action='store_true',
-    help="Generate plots used for testing"
+    help="Directory into which to store plots used for testing"
 )
 
 parser.add_argument(
@@ -72,7 +64,7 @@ for channel, trigger_filename in args.trigger_merge_files.items():
         template_ids[channel] = tids
         channels.update([channel])
 
-channels = list(channels)
+channels = sorted(list(channels))
 
 total_template_ids = set()
 for channel in channels:
@@ -91,12 +83,12 @@ logger.info("Channels: %s", channels)
 
 coincident_triggers = {
     "template_id": [],
-    "timeslide_id": [],
 }
 for channel in channels:
     coincident_triggers.update({
         f"time_{channel}": [],
         f"snr_{channel}": [],
+        f"trigger_id_{channel}": [],
     })
 
 # Open the files
@@ -126,107 +118,80 @@ for template_idx in shared_template_ids:
     trigger_snrs_0 = triggers[channels[0]]['snr'][this_template[channels[0]]]
     trigger_snrs_1 = triggers[channels[1]]['snr'][this_template[channels[1]]]
 
-    # slide_id = 0 is zero-lag (on-source)
-    # slide_id != 0 are the timeslides
-    slide_ids = [0]
-    if args.num_timeslides > 0:
-        slide_ids.extend(
-            list(range(-args.num_timeslides, 0)) + list(range(1, args.num_timeslides + 1))
-        )
+    for idx_one, time_0 in enumerate(trigger_times_0):
+        left = np.searchsorted(trigger_times_1, time_0 - args.coincidence_window)
+        right = np.searchsorted(trigger_times_1, time_0 + args.coincidence_window)
 
-    for slide_id in slide_ids:
-        time_shift = slide_id * args.coincidence_window
-        shifted_trigger_times_0 = trigger_times_0 + time_shift
-
-        for idx_one, time_0 in enumerate(shifted_trigger_times_0):
-            left = np.searchsorted(trigger_times_1, time_0 - args.coincidence_window)
-            right = np.searchsorted(trigger_times_1, time_0 + args.coincidence_window)
-
-            if (right - left) == 1:
-                # Coincident triggers!
-                logger.debug(
-                    "Slide %d: Trigger at time %.1f in channel %s is within coincidence "
-                    "window of trigger in %s at time %.1f",
-                    slide_id,
-                    trigger_times_0[idx_one],
-                    channels[0],
-                    channels[1],
-                    trigger_times_1[left],
-                )
-                # Add to the list of triggers
-                coincident_triggers['template_id'].append(template_idx)
-                coincident_triggers['timeslide_id'].append(slide_id)
-                coincident_triggers[f'time_{channels[0]}'].append(trigger_times_0[idx_one])
-                coincident_triggers[f'snr_{channels[0]}'].append(trigger_snrs_0[idx_one])
-                coincident_triggers[f'time_{channels[1]}'].append(trigger_times_1[left])
-                coincident_triggers[f'snr_{channels[1]}'].append(trigger_snrs_1[left])
-            elif (right - left) > 1:
-                # This case is not handled yet.
-                # It means multiple triggers from channel 1 fall within the window of a single trigger from channel 0.
-                pass
+        if (right - left) == 1:
+            # Coincident triggers!
+            logger.debug(
+                "Trigger at time %.1f in channel %s is within coincidence "
+                "window of trigger in %s at time %.1f",
+                trigger_times_0[idx_one],
+                channels[0],
+                channels[1],
+                trigger_times_1[left],
+            )
+            # Add to the list of triggers
+            coincident_triggers['template_id'].append(template_idx)
+            coincident_triggers[f'trigger_id_{channels[0]}'].append(idx_one)
+            coincident_triggers[f'trigger_id_{channels[1]}'].append(left)
+            # SNR and time could be got from indexing on the trigger merge files, but add these in so that
+            # everything is in one place - this may need updated later
+            coincident_triggers[f'time_{channels[0]}'].append(trigger_times_0[idx_one])
+            coincident_triggers[f'snr_{channels[0]}'].append(trigger_snrs_0[idx_one])
+            coincident_triggers[f'time_{channels[1]}'].append(trigger_times_1[left])
+            coincident_triggers[f'snr_{channels[1]}'].append(trigger_snrs_1[left])
+        elif (right - left) > 1:
+            # This case is not handled yet.
+            # It means multiple triggers from channel 1 fall within the window of a single trigger from channel 0.
+            raise RuntimeError(
+                "Multiple triggers found within the coincidence window"
+            )
 
 # Convert to numpy arrays
 for key in coincident_triggers.keys():
-    if 'template_id' in key or 'timeslide_id' in key:
+    if any(key.startswith(s) for s in ['template_id', 'timeslide_id', 'trigger_id']):
         dtype = np.int32
     else:
         dtype = np.float32
     coincident_triggers[key] = np.array(coincident_triggers[key], dtype=dtype)
 logger.info("Found %d coincident triggers", len(coincident_triggers['template_id']))
 
-# Now lets do some clustering - cluster by quadratic sum of SNRs
-# (aka network SNR), using the midpoint of the trigger times
+# Now lets do some clustering - cluster by qstatistic
+# For now the statistic is the quadratic sum of SNRs
+# and the time is the midpoint of the trigger times
+# We may want something more complicated in the future
 logger.info("Clustering")
 
-network_times = (
+coinc_time = (
     coincident_triggers[f'time_{channels[0]}'] + coincident_triggers[f'time_{channels[1]}']
 ) / 2
-network_snrs = (
+coinc_stat = (
     coincident_triggers[f'snr_{channels[0]}'] ** 2 + coincident_triggers[f'snr_{channels[1]}'] ** 2
 ) ** 0.5
-network_tids = coincident_triggers['template_id'][:]
+coinc_tids = coincident_triggers['template_id'][:]
 
+n_coincs = len(coinc_time)
 
-# Do clustering - nothing particularly fancy here,
-# just check if there is anything louder within the window,
-# if there is then just get rid of this coincidence
+# Now, perform a standard greedy clustering on the coincs
+# First, sort by statistic - loudest first
+indices = np.argsort(coinc_stat)[::-1]
 
-
-n_triggers = network_times.size
-keep = np.ones(n_triggers, dtype=bool)
-# Sort by SNR (descending), and then by time (ascending) as a tie-breaker
-# to ensure deterministic clustering.
-sorted_indices = np.lexsort((network_times, -network_snrs))
-
-for i in sorted_indices:
-    # if we've already removed this one, skip
-    if not keep[i]:
+keep = np.ones(n_coincs, dtype=bool)
+for sorted_coinc_idx in range(n_coincs):
+    coinc_idx = indices[sorted_coinc_idx]
+    if not keep[coinc_idx]:
         continue
-
-    # find other triggers within the window
-    # that have not been removed yet
-    time = network_times[i]
-    in_window_and_kept = (
-        (np.abs(time - network_times) < args.coincidence_window) & keep
-    )
-
-    # The current trigger is the loudest in this window
-    # because we are iterating from loudest to quietest.
-    # So, remove all other triggers in the window.
-    # First, set current trigger to False in the mask to not remove it
-    in_window_and_kept[i] = False
-
-    # Now remove all others that are True in the mask
-    keep[in_window_and_kept] = False
+    within_window = np.abs(coinc_time - coinc_time[coinc_idx]) < args.coincidence_window
+    keep[within_window] = False
+    keep[coinc_idx] = True
 
 clustered_coincident_triggers = {}
-clustered_coincident_triggers['template_id'] = coincident_triggers['template_id'][keep]
-clustered_coincident_triggers['timeslide_id'] = coincident_triggers['timeslide_id'][keep]
-for channel in channels:
-    clustered_coincident_triggers[f'time_{channel}'] = coincident_triggers[f'time_{channel}'][keep]
-    clustered_coincident_triggers[f'snr_{channel}'] = coincident_triggers[f'snr_{channel}'][keep]
+for key in coincident_triggers.keys():
+    clustered_coincident_triggers[key] = coincident_triggers[key][keep]
 
-logger.info("%d out of %d coincidences remain after clustering", clustered_coincident_triggers['template_id'].size, n_triggers)
+logger.info("%d out of %d coincidences remain after clustering", clustered_coincident_triggers['template_id'].size, n_coincs)
 
 logger.info("Outputting to file")
 with h5py.File(args.output_file, 'w') as output_trigger_file:
@@ -237,18 +202,10 @@ with h5py.File(args.output_file, 'w') as output_trigger_file:
             compression='gzip'
         )
 
-if args.testing_plots:
+# Print the 25 highest-statistic events
 
-    # We only plot things with timeslide ID of zero (foreground)
-    clustered_coincident_triggers = {
-        key: clustered_coincident_triggers[key][clustered_coincident_triggers['timeslide_id'] == 0]
-        for key in clustered_coincident_triggers.keys()
-    }
-    coincident_triggers = {
-        key: coincident_triggers[key][coincident_triggers['timeslide_id'] == 0]
-        for key in coincident_triggers.keys()
-    }
-
+if args.testing_plots is not None:
+    logger.info("Plotting")
 
     with h5py.File(args.expected_snr_file, 'r') as expected_snr_file:
         mbhb_times = expected_snr_file["mbhb_time"][:]
@@ -290,32 +247,32 @@ if args.testing_plots:
         cmap='jet',
         alpha=0.1,
     )
-    network_times = (
+    coinc_times_all = (
         coincident_triggers[f'time_{channels[0]}'] + coincident_triggers[f'time_{channels[1]}']
     ) / 2
-    network_snrs = (
+    coinc_stat_all = (
         coincident_triggers[f'snr_{channels[0]}'] ** 2 + coincident_triggers[f'snr_{channels[1]}'] ** 2
     ) ** 0.5
     
     im = ax.scatter(
-        network_times / 86400,
-        network_snrs,
+        coinc_times_all / 86400,
+        coinc_stat_all,
         marker='o',
         c=coincident_triggers['template_id'],
         norm=cnorm,
         cmap='jet',
         alpha=0.1,
     )
-    clustered_network_times = (
+    coinc_time_clustered = (
         clustered_coincident_triggers[f'time_{channels[0]}'] + clustered_coincident_triggers[f'time_{channels[1]}']
     ) / 2
-    clustered_network_snrs = (
+    coinc_stat_clustered = (
         clustered_coincident_triggers[f'snr_{channels[0]}'] ** 2 + clustered_coincident_triggers[f'snr_{channels[1]}'] ** 2
     ) ** 0.5
     
     ax.scatter(
-        clustered_network_times / 86400,
-        clustered_network_snrs,
+        coinc_time_clustered / 86400,
+        coinc_stat_clustered,
         marker='*',
         edgecolors='k',
         c='y',
@@ -333,8 +290,40 @@ if args.testing_plots:
     
     ax.set_xlabel('Time (days)')
     ax.set_ylabel('SNR')
-    # ax.set_xlim(120, 145)
-    fig.savefig('output/coincident_triggers.png')
+    # ax.set_xlim(230, 240)
+    # ax.set_ylim(0, 200)
+    fig.savefig(f'{args.testing_plots}/coincident_triggers.png')
     plt.close(fig)
+
+    fig, ax = plt.subplots()
+    bins = np.logspace(
+        np.log10(coinc_stat_clustered.min()),
+        np.log10(coinc_stat_clustered.max()),
+        100
+    )
+    hist_snr, bins = np.histogram(coinc_stat_clustered, bins=bins)
+    cumhist = np.cumsum(hist_snr[::-1])[::-1]
+    ax.step(
+        bins[:-1],
+        cumhist,
+        label="Clustered Coincs Statistic"
+    )
+    ax.set_xscale('log')
+    ax.set_yscale('log')
+    ax.set_xlabel('SNR')
+    ax.set_ylabel('Count of louder events (per year)')
+
+    sort_expected = np.argsort(expected_snrs)
+    ax.step(
+        expected_snrs[sort_expected],
+        np.arange(len(expected_snrs))[::-1] + 1,
+        label="Expected statistic for Signals"
+    )
+    ax.legend(loc='upper right')
+
+    fig.savefig(f'{args.testing_plots}/snr_histogram.png')
+    plt.close(fig)
+
+
 
 logger.info("Done!")

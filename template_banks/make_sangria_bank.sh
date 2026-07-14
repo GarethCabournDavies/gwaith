@@ -1,6 +1,6 @@
 python ./pycbc_brute_bank \
     --verbose \
-    --minimal-match 0.8 \
+    --minimal-match 0.9 \
     --tolerance .05 \
     --buffer-length 2592000 \
     --sample-rate .2 \
@@ -12,6 +12,11 @@ python ./pycbc_brute_bank \
     --tau0-cutoff-frequency 0.0001 \
     --input-config config.ini \
     --seed 1 \
-    --output-file output/lisa_bank_full.hdf \
+    --output-file output/sangria_bank.hdf \
     --psd-file ../psd_estimation/A_sangria_hm_SMOOTHED_PSD.txt \
     --low-frequency-cutoff .000001
+
+python plot_mbhb_bank.py \
+  --bank-file output/sangria_bank.hdf \
+  --output-plot output/sangria_bank.png \
+  --signal-definition-file ../datasets/LDC2_sangria_hm_training.hdf

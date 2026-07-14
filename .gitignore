@@ -1,0 +1,12 @@
+__pycache__
+.venv
+# Data-specific diagnostic notebooks remain local.
+/examples/search/**/*.ipynb
+
+# Local dataset investigations and generated diagnostic material.
+/docs/benchmarks/
+/docs/mojito_boundary_investigation.md
+/docs/mojito_fastbhb_conventions.md
+/docs/mojito_phase_convention_diagnostic.md
+/docs/mojito_residual_investigation.md
+/examples/search/diagnostics/
