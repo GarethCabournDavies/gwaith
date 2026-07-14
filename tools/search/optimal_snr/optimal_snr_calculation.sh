@@ -1,4 +1,4 @@
-python optimal_snr_calculation.py \
+hwilas_optimal_snr \
   --data-file ../../datasets/LDC2_sangria_hm_training.hdf \
   --bank-file ../../template_banks/output/lisa_bank_full.hdf \
   --psd-files \

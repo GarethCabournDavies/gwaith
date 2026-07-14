@@ -16,7 +16,7 @@ python ./pycbc_brute_bank \
     --psd-file ../psd_estimation/A_sangria_hm_SMOOTHED_PSD.txt \
     --low-frequency-cutoff .000001
 
-python plot_mbhb_bank.py \
+hwilas_plot_bank \
   --bank-file output/sangria_bank.hdf \
   --output-plot output/sangria_bank.png \
   --signal-definition-file ../datasets/LDC2_sangria_hm_training.hdf

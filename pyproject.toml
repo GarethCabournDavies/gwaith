@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hwilas"
+version = "0.1.0"
+description = "Command-line tools for HWI LISA searches"
+readme = "README.md"
+requires-python = ">=3.11"
+
+[project.scripts]
+hwilas_coincidence = "tools.search.coincidence:main"
+hwilas_matched_filter = "tools.search.matched_filter:main"
+hwilas_optimise_snr_peaks = "tools.search.optimise_snr_peaks:main"
+hwilas_process_sangria_data = "tools.data_processing.process_sangria_data:main"
+hwilas_trigger_merge = "tools.search.trigger_merge:main"
+hwilas_optimal_snr = "tools.search.optimal_snr.optimal_snr_calculation:main"
+hwilas_plot_bank = "tools.template_banks.plot_mbhb_bank:main"
+hwilas_estimate_mojito_psd = "tools.psd_estimation.estimate_mojito_psd:main"
+
+[tool.setuptools]
+packages = [
+	"hwilas",
+	"tools",
+	"tools.search",
+	"tools.search.optimal_snr",
+	"tools.psd_estimation",
+	"tools.template_banks",
+]

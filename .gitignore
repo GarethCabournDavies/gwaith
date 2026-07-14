@@ -1,5 +1,7 @@
 __pycache__
 .venv
+.vscode
+hwilas.egg-info
 # Data-specific diagnostic notebooks remain local.
 /examples/search/**/*.ipynb
 
