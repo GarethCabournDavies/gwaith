@@ -18,33 +18,23 @@ import pycbc.psd
 import pycbc.filter
 import pycbc.waveform
 
+from hwilas.types import KeyValueAction
+
 logger = logging.getLogger(__name__)
 
-class KeyValueAction(argparse.Action):
-    """
-    Argparse action to accept key:value pairs.
-    These are stored in a dictionary.
-    """
-    def __call__(self, parser, namespace, values, option_string=None):
-        if getattr(namespace, self.dest, None) is None:
-            setattr(namespace, self.dest, {})
-        for value in values:
-            key, val_str = value.split(':', 1)
-            val = float(val_str)
-            getattr(namespace, self.dest)[key] = val
 
-
-
-def compute_network_snr_core(v, data, psd, waveform_params_shared, raise_err=False):
+def build_aligned_waveform(v, data, waveform_params_shared, raise_err=False):
     mtotal = conv.mtotal_from_mchirp_eta(v[0], v[1])
     mass1 = conv.mass1_from_mtotal_eta(mtotal, v[1])
     mass2 = conv.mass2_from_mtotal_eta(mtotal, v[1])
 
-    # get tlen out from the data
-    ifos = list(data.keys())
-    delta_t = data[ifos[0]].delta_t
+    channels = list(data.keys())
+    delta_t = data[channels[0]].delta_t
+    segment_duration = len(data[channels[0]]) * delta_t
+    data_start_time = float(data[channels[0]]._epoch)
     
     waveform_params = copy.deepcopy(waveform_params_shared)
+    waveform_params.setdefault("distance", 1.0)
     waveform_params.update({
         "mass1": mass1,
         "mass2": mass2,
@@ -53,33 +43,74 @@ def compute_network_snr_core(v, data, psd, waveform_params_shared, raise_err=Fal
         "eclipticlongitude": v[4],
         "eclipticlatitude": v[5],
         "inclination": v[6],
-        "tc": v[7],
+        # Build with merger at segment end and apply an explicit time shift
+        # below so tc is always interpreted in absolute data time.
+        "tc": segment_duration,
         "polarization": v[8],
     })
 
     try:
         wf = pycbc.waveform.get_fd_det_waveform(
             **waveform_params,
-            channels=args.channels,
+            channels=channels,
             delta_t=delta_t,
-            ifos=ifos
+            ifos=channels
         )
     except RuntimeError as err:
         if raise_err:
             raise err
+        return None
+
+    coalescence_in_segment = v[7] - data_start_time
+    shift_seconds = coalescence_in_segment - segment_duration
+    for channel in channels:
+        wf[channel] = wf[channel].cyclic_time_shift(shift_seconds)
+
+    return wf
+
+
+def compute_network_snr_core(v, data, psd, waveform_params_shared, raise_err=False):
+    wf = build_aligned_waveform(
+        v,
+        data,
+        waveform_params_shared,
+        raise_err=raise_err,
+    )
+    if wf is None:
         # The waveform generation has failed - instead of actually failing,
-        # just say that this waveform is not allowed
+        # just say that this waveform is not allowed.
         return -np.inf
-    
-    snrsq = 0
+
+    snrsq = 0.0
     for channel in data.keys():
-        snrsq += pycbc.filter.matched_filter(
+        snrsq += abs(pycbc.filter.matched_filter(
             wf[channel],
             data[channel],
             psd=psd,
-        )[0] ** 2
+        )[0]) ** 2
 
     return snrsq ** 0.5
+
+
+def estimate_distance_from_match(wf, data, psd, reference_distance=1.0):
+    snrsq = 0.0
+    hhsq = 0.0
+    for channel in data.keys():
+        snrsq += abs(pycbc.filter.matched_filter(
+            wf[channel],
+            data[channel],
+            psd=psd,
+        )[0]) ** 2
+        hhsq += pycbc.filter.sigmasq(wf[channel], psd=psd)
+
+    if hhsq <= 0:
+        return reference_distance
+
+    amplitude_scale = (snrsq ** 0.5) / (hhsq ** 0.5)
+    if amplitude_scale <= 0:
+        return reference_distance
+
+    return reference_distance / amplitude_scale
 
 
 def compute_minus_network_snr(positions, **kwargs):
@@ -91,7 +122,7 @@ def compute_minus_network_snr(positions, **kwargs):
     return costs
 
 
-def main():
+def load_arguments():
     parser = argparse.ArgumentParser()
     pycbc.add_common_pycbc_options(parser)
     parser.add_argument(
@@ -100,24 +131,28 @@ def main():
         help="File containing coincident events"
     )
     parser.add_argument(
-        "--n-loudest",
-        type=int,
-        default=10,
-        help="Optimise & remove the N loudest events. Default 10"
-    )
-    parser.add_argument(
         "--statistic-threshold",
         type=float,
-        default=60,
+        default=40,
         help="When deciding the events to optimise / add to signal timeseries, use this threshold. "
-        "Default 60."
+        "Default 40."
+    )
+    parser.add_argument(
+        "--minimum-peak-separation",
+        type=float,
+        default=604800,
+        help="Minimum separation of peaks to be optimised. Seconds. Default 604800 (1 week)"
     )
     parser.add_argument(
         "--bank-file",
         required=True
     )
     parser.add_argument(
-        "--output-file",
+        "--signal-output-file",
+        help="File containing the optimised event timeseries"
+    )
+    parser.add_argument(
+        "--signal-parameter-file",
         help="File containing the optimised event parameters"
     )
     parser.add_argument(
@@ -195,18 +230,9 @@ def main():
         "is smaller than this value"
     )
 
-    args = parser.parse_args()
+    return parser.parse_args()
 
-    # Some libraries, like pyswarms, may add a default StreamHandler to the root
-    # logger upon import. This can lead to duplicate log messages. To prevent this,
-    # we find and remove any pre-existing StreamHandlers before initializing
-    # our own logging.
-    logging.getLogger().handlers.clear()
-
-
-
-    pycbc.init_logging(args.verbose)
-
+def get_events_to_optimise(args):
     logger.info("Getting events which need optimised")
     with h5py.File(args.input_file, 'r') as input_file:
         coincs = {}
@@ -224,39 +250,125 @@ def main():
         coincs[f'time_{args.channels[0]}'] + coincs[f'time_{args.channels[1]}']
     ) / 2
     coinc_tempid = coincs["template_id"]
+    logger.info("%d events in file", len(coinc_stat))
 
+    # remove anything not above the statistic threshold
     above_threshold = coinc_stat > args.statistic_threshold
     coinc_stat = coinc_stat[above_threshold]
     coinc_time = coinc_time[above_threshold]
     coinc_tempid = coinc_tempid[above_threshold]
+    logger.info(
+        "%d events remain after thresholding on statistic value %.3f",
+        len(coinc_stat),
+        args.statistic_threshold
+    )
 
-    if len(coinc_stat) > args.n_loudest:
-        stat_sort = np.argsort(coinc_stat)[::-1]
-        coinc_stat = coinc_stat[stat_sort[:args.n_loudest]]
-        coinc_time = coinc_time[stat_sort[:args.n_loudest]]
-        coinc_tempid = coinc_tempid[stat_sort[:args.n_loudest]]
+    # Sort the events by time to make the next step easier
+    time_sort = np.argsort(coinc_time)
+    coinc_stat = coinc_stat[time_sort]
+    coinc_time = coinc_time[time_sort]
+    coinc_tempid = coinc_tempid[time_sort]
 
-    # template IDs need to be unique for reading from the file, but by using return_inverse=True
-    # We can get things back in the original order
-    unique_tempids, inverse_indices = np.unique(coinc_tempid, return_inverse=True)
+    # Now, we use a greedy algorithm to sort through the remaining events and 
+    # remove anything within the minimum separation window.
+    # We will optimise however many are above the threshold and separated by the
+    # minimum peak separation
+    loudest_idx = 0
+    while True:
+        if not any(abs(np.diff(coinc_time)) < args.minimum_peak_separation):
+            break
 
+        # If this is the Nth iteration, the the Nth loudest of the remaining
+        # triggers
+        stat_sort = np.argsort(coinc_stat)
+        loudest_time = coinc_time[stat_sort[loudest_idx]]
+
+        # These are the events to be removed
+        within_window = abs(coinc_time - loudest_time) < args.minimum_peak_separation
+        # Dont remove the event itself though
+        within_window[loudest_idx] = False
+
+        logger.info(
+            "Removing %d events within %.1f days of loudest event at time %.3f",
+            np.sum(within_window),
+            args.minimum_peak_separation / 86400,
+            loudest_time / 86400
+        )
+        coinc_stat = coinc_stat[~within_window]
+        coinc_time = coinc_time[~within_window]
+        coinc_tempid = coinc_tempid[~within_window]
+
+        loudest_idx += 1
+
+    logger.info(
+        "%d events remain after minimum separation requirement",
+        len(coinc_stat)
+    )
+
+    # Sort back into statistic order
+    stat_sort = np.argsort(coinc_stat)[::-1]
+    coinc_stat = np.array(coinc_stat[stat_sort])
+    coinc_time = np.array(coinc_time[stat_sort])
+    coinc_tempid = np.array(coinc_tempid[stat_sort])
+
+    for i, (time, stat, tempid) in enumerate(zip(coinc_time, coinc_stat, coinc_tempid)):
+        logger.info(
+            "Event %d at time %.1f days with statistic %.3f, template %d",
+            i,
+            time / 86400,
+            stat,
+            tempid
+        )
+
+    return coinc_stat, coinc_time, coinc_tempid
+
+_BANK_PARAMETERS = [
+    'mass1',
+    'mass2',
+    'spin1z',
+    'spin2z',
+    'eclipticlongitude',
+    'eclipticlatitude',
+    'inclination',
+    'polarization'
+]
+
+def get_bank_parameters(args, coinc_tempid):
     logger.info("Getting bank parameters for the top events")
-    bank_parameters = [
-        'mass1',
-        'mass2',
-        'spin1z',
-        'spin2z',
-        'eclipticlongitude',
-        'eclipticlatitude',
-        'inclination',
-        'polarization'
-    ]
+
+    # template IDs need to be unique for reading from the file,
+    # but by using return_inverse=True
+    # we can get things back in the original order
+    unique_tempids, inverse_indices = np.unique(
+        coinc_tempid,
+        return_inverse=True
+    )
+
     bank = {}
     with h5py.File(args.bank_file, 'r') as bank_file:
-        for parameter in bank_parameters:
+        for parameter in _BANK_PARAMETERS:
             unique_params = bank_file[parameter][unique_tempids]
             # Restore the input order using the inverse indexes.
             bank[parameter] = unique_params[inverse_indices]
+
+    return bank
+
+def main():
+
+    args = load_arguments()
+
+    # Some libraries, like pyswarms, may add a default StreamHandler to the root
+    # logger upon import. This can lead to duplicate log messages. To prevent this,
+    # we find and remove any pre-existing StreamHandlers before initializing
+    # our own logging.
+    logging.getLogger().handlers.clear()
+
+    pycbc.init_logging(args.verbose)
+
+    coinc_stat, coinc_time, coinc_tempid = get_events_to_optimise(args)
+
+    bank = get_bank_parameters(args, coinc_tempid)
+
 
     logger.info("Loading Data")
     data = {}
@@ -315,6 +427,24 @@ def main():
         "polarization",
     ]
 
+    optimised_parameters = {
+        'template_id': [],
+        'network_snr_initial': [],
+        'network_snr_optimised': [],
+        'mchirp': [],
+        'eta': [],
+        'mass1': [],
+        'mass2': [],
+        'spin1z': [],
+        'spin2z': [],
+        'eclipticlongitude': [],
+        'eclipticlatitude': [],
+        'inclination': [],
+        'tc': [],
+        'polarization': [],
+        'distance': [],
+    }
+
     logger.info("Determining bounds for parameters not relative to initial")
 
     # All optimiser parameters need to have min and max. These should be set from the dynamic options or
@@ -342,19 +472,6 @@ def main():
             min_bound = max(min_bound, args.minimum_bounds[parameter])
         static_parameter_bounds[parameter] = (min_bound, max_bound)
 
-    logger.info("Overwhitening the data")
-    ref_channel = args.channels[0]
-    ref_freq_data = data[ref_channel].to_frequencyseries()
-    psd = pycbc.psd.from_txt(
-        args.psd_file,
-        len(ref_freq_data),
-        ref_freq_data.delta_f,
-        ref_freq_data.delta_f,
-        is_asd_file=False,
-    )
-    psd.data[0] = np.inf
-    psd.data[1] = np.inf
-        
     for idx, (stat, time) in enumerate(zip(coinc_stat, coinc_time)):
         logger.info("Event %d at time %.1f days with statistic %.3f", idx, time / 86400, stat)
 
@@ -362,7 +479,7 @@ def main():
         this_event_template_id = coinc_tempid[idx]
         this_event_template = {
             parameter: bank[parameter][idx]
-            for parameter in bank_parameters
+            for parameter in _BANK_PARAMETERS
         }
 
         mchirp_init = conv.mchirp_from_mass1_mass2(
@@ -429,6 +546,16 @@ def main():
         delta_f = 1. / tlen
         flen = len(data_thismerger[args.channels[0]]) // 2 + 1
 
+        psd = pycbc.psd.from_txt(
+            args.psd_file,
+            flen,
+            delta_f,
+            delta_f,
+            is_asd_file=False,
+        )
+        psd.data[0] = np.inf
+        psd.data[1] = np.inf
+
         waveform_params_shared = {
             'f_lower': args.f_lower,
             'low-frequency-cutoff': args.f_lower, 
@@ -470,10 +597,13 @@ def main():
         elif maximised_stat == stat:
             logging.info("Statistic unchanged from %.1f", stat)
         else:
-            logging.info("Statistic decreased from %.1f to %.1f", stat, maximised_stat)
-            maximised_template = this_event_template
+            logging.warning(
+                "Statistic decreased from %.1f to %.1f - this shouldnt happen!",
+                stat,
+                maximised_stat
+            )
 
-        
+
         # Get the maximised template from the results
         maximised_template = copy.deepcopy(waveform_params_shared)
         maximised_template.update({
@@ -495,13 +625,38 @@ def main():
         )
         maximised_template['mass1'] = maximised_mass1
         maximised_template['mass2'] = maximised_mass2
-        print(this_event_template, maximised_template)
+
+        maximised_wf_for_snr = build_aligned_waveform(
+            results,
+            data_thismerger,
+            waveform_params_shared,
+            raise_err=True,
+        )
+        distance = estimate_distance_from_match(
+            maximised_wf_for_snr,
+            data_thismerger,
+            psd,
+            reference_distance=1.0,
+        )
+        maximised_template['distance'] = distance
+
+        optimised_parameters['template_id'].append(int(this_event_template_id))
+        optimised_parameters['network_snr_initial'].append(float(stat))
+        optimised_parameters['network_snr_optimised'].append(float(maximised_stat))
+        for parameter in [
+            'mchirp', 'eta', 'mass1', 'mass2', 'spin1z', 'spin2z',
+            'eclipticlongitude', 'eclipticlatitude', 'inclination', 'tc',
+            'polarization', 'distance'
+        ]:
+            optimised_parameters[parameter].append(float(maximised_template[parameter]))
 
         # We need to update the lengths to the original data
         # for the signal timeseries
+        coalescence_time_abs = float(results[7])
         maximised_template["t_obs_start"] = int(original_tlen + 0.5)
         maximised_template["delta_f"] = original_delta_f
         maximised_template["length"] = original_flen
+        maximised_template["tc"] = original_tlen
 
         # Get the waveform for the maximised point
         maximised_wf = pycbc.waveform.get_fd_det_waveform(
@@ -510,29 +665,59 @@ def main():
             delta_t=delta_t,
             ifos=args.channels
         )
+        full_coalescence_in_segment = coalescence_time_abs - float(original_data_epoch)
+        full_shift_seconds = full_coalescence_in_segment - original_tlen
+        for channel in args.channels:
+            maximised_wf[channel] = maximised_wf[channel].cyclic_time_shift(full_shift_seconds)
+
         maximised_wf_ts = {
             channel: maximised_wf[channel].to_timeseries(delta_t=delta_t)
             for channel in args.channels
         }
+        for channel in args.channels:
+            maximised_wf_ts[channel]._epoch = original_data_epoch
 
-        fig, ax = plt.subplots()
-        ax.plot(
-            maximised_wf_ts[args.channels[0]].sample_times,
-            maximised_wf_ts[args.channels[0]],
-            label="Maximised WF"
-        )
-        ax.plot(
-            data[args.channels[0]].sample_times,
-            data[args.channels[0]],
-            label="Data"
-        )
-        ax.legend(loc='upper right')
-        ax.set_xlabel('Time (s)')
-        ax.set_ylabel('Amplitude')
-        fig.savefig('test_wf_output.png')
+        if args.testing_plots is not None:
+            fig, ax = plt.subplots()
+            ax.plot(
+                maximised_wf_ts[args.channels[0]].sample_times,
+                maximised_wf_ts[args.channels[0]],
+                label="Maximised WF"
+            )
+            ax.plot(
+                data[args.channels[0]].sample_times,
+                data[args.channels[0]],
+                label="Data"
+            )
+            ax.legend(loc='upper right')
+            ax.set_xlabel('Time (s)')
+            ax.set_ylabel('Amplitude')
+            fig.savefig(f'{args.testing_plots}/maximised_wf_{idx}.png')
+            plt.close(fig)
 
         for channel in args.channels:
             signal_timeseries[channel] += maximised_wf_ts[channel]
-            
+
+    if args.signal_parameter_file is not None:
+        logger.info("Writing optimised parameters to %s", args.signal_parameter_file)
+        with h5py.File(args.signal_parameter_file, 'w') as output_parameter_file:
+            for key, vals in optimised_parameters.items():
+                output_parameter_file.create_dataset(key, data=np.array(vals), compression='gzip')
+
+    output_timeseries_path = args.output_timeseries_file
+    if output_timeseries_path is None:
+        output_timeseries_path = args.signal_output_file
+
+    if output_timeseries_path is not None:
+        logger.info("Writing optimised signal timeseries to %s", output_timeseries_path)
+        with h5py.File(output_timeseries_path, 'w') as output_ts_file:
+            output_ts_file.attrs['epoch'] = float(original_data_epoch)
+            output_ts_file.attrs['delta_t'] = float(delta_t)
+            for channel in args.channels:
+                output_ts_file.create_dataset(
+                    channel,
+                    data=signal_timeseries[channel].data,
+                    compression='gzip',
+                )
 
     logger.info("Done!")
