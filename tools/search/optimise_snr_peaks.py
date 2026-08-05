@@ -3,30 +3,27 @@ Optimise SNR for peaks found in coincidences
 """
 
 import argparse
+import copy
 import logging
 import h5py
 import numpy as np
-import copy
+import pyswarms as ps
 from matplotlib import pyplot as plt
 
-import pyswarms as ps
+from gwaith.types import TimeSeries
 
-import pycbc
-from pycbc.types import TimeSeries
-from pycbc import conversions as conv
-import pycbc.psd
-import pycbc.filter
-import pycbc.waveform
-
+from hwilas import add_hwilas_common_options, init_logging
+from hwilas.conversions import mchirp_eta_from_mass1_mass2, mass1_mass2_from_mchirp_eta
+from hwilas.filter import matched_filter_frequencyseries, sigmasq_frequencyseries
+from hwilas.psd.read import from_txt as psd_from_txt
 from hwilas.types import KeyValueAction
+from hwilas.waveforms import get_fd_waveform
 
 logger = logging.getLogger(__name__)
 
 
 def build_aligned_waveform(v, data, waveform_params_shared, raise_err=False):
-    mtotal = conv.mtotal_from_mchirp_eta(v[0], v[1])
-    mass1 = conv.mass1_from_mtotal_eta(mtotal, v[1])
-    mass2 = conv.mass2_from_mtotal_eta(mtotal, v[1])
+    mass1, mass2 = mass1_mass2_from_mchirp_eta(v[0], v[1])
 
     channels = list(data.keys())
     delta_t = data[channels[0]].delta_t
@@ -50,15 +47,14 @@ def build_aligned_waveform(v, data, waveform_params_shared, raise_err=False):
     })
 
     try:
-        wf = pycbc.waveform.get_fd_det_waveform(
+        wf = get_fd_waveform(
+            approximant=waveform_params['approximant'],
             **waveform_params,
-            channels=channels,
-            delta_t=delta_t,
             ifos=channels
         )
-    except RuntimeError as err:
+    except RuntimeError:
         if raise_err:
-            raise err
+            raise
         return None
 
     coalescence_in_segment = v[7] - data_start_time
@@ -82,12 +78,15 @@ def compute_network_snr_core(v, data, psd, waveform_params_shared, raise_err=Fal
         return -np.inf
 
     snrsq = 0.0
-    for channel in data.keys():
-        snrsq += abs(pycbc.filter.matched_filter(
+    for channel, data_channel in data.items():
+        snr_ts = matched_filter_frequencyseries(
             wf[channel],
-            data[channel],
+            data_channel.to_frequencyseries(),
             psd=psd,
-        )[0]) ** 2
+            n_samples=len(data_channel),
+            epoch=float(getattr(data_channel, 'epoch', getattr(data_channel, '_epoch', 0.0))),
+        )
+        snrsq += abs(snr_ts.data[0]) ** 2
 
     return snrsq ** 0.5
 
@@ -95,13 +94,16 @@ def compute_network_snr_core(v, data, psd, waveform_params_shared, raise_err=Fal
 def estimate_distance_from_match(wf, data, psd, reference_distance=1.0):
     snrsq = 0.0
     hhsq = 0.0
-    for channel in data.keys():
-        snrsq += abs(pycbc.filter.matched_filter(
+    for channel, data_channel in data.items():
+        snr_ts = matched_filter_frequencyseries(
             wf[channel],
-            data[channel],
+            data_channel.to_frequencyseries(),
             psd=psd,
-        )[0]) ** 2
-        hhsq += pycbc.filter.sigmasq(wf[channel], psd=psd)
+            n_samples=len(data_channel),
+            epoch=float(getattr(data_channel, 'epoch', getattr(data_channel, '_epoch', 0.0))),
+        )
+        snrsq += abs(snr_ts.data[0]) ** 2
+        hhsq += sigmasq_frequencyseries(wf[channel], psd)
 
     if hhsq <= 0:
         return reference_distance
@@ -124,7 +126,7 @@ def compute_minus_network_snr(positions, **kwargs):
 
 def load_arguments():
     parser = argparse.ArgumentParser()
-    pycbc.add_common_pycbc_options(parser)
+    add_hwilas_common_options(parser)
     parser.add_argument(
         "--input-file",
         required=True,
@@ -228,6 +230,13 @@ def load_arguments():
         "Given in parameter:minimum_bound pairs e.g. mchirp:5e5. This will be set as the bound if "
         "--bounds-window-relative-to-initial is not given, or if the template minus the bounds "
         "is smaller than this value"
+    )
+
+    parser.add_argument(
+        '--tdi-generation',
+        choices=['1.5','2'],
+        default="1.5",
+        help="Which generation of TDI to use when generating the waveform"
     )
 
     return parser.parse_args()
@@ -363,7 +372,7 @@ def main():
     # our own logging.
     logging.getLogger().handlers.clear()
 
-    pycbc.init_logging(args.verbose)
+    init_logging(args.verbose)
 
     coinc_stat, coinc_time, coinc_tempid = get_events_to_optimise(args)
 
@@ -482,11 +491,7 @@ def main():
             for parameter in _BANK_PARAMETERS
         }
 
-        mchirp_init = conv.mchirp_from_mass1_mass2(
-            this_event_template['mass1'],
-            this_event_template['mass2']
-        )
-        eta_init = conv.eta_from_mass1_mass2(
+        mchirp_init, eta_init = mchirp_eta_from_mass1_mass2(
             this_event_template['mass1'],
             this_event_template['mass2']
         )
@@ -546,7 +551,7 @@ def main():
         delta_f = 1. / tlen
         flen = len(data_thismerger[args.channels[0]]) // 2 + 1
 
-        psd = pycbc.psd.from_txt(
+        psd = psd_from_txt(
             args.psd_file,
             flen,
             delta_f,
@@ -559,7 +564,7 @@ def main():
         waveform_params_shared = {
             'f_lower': args.f_lower,
             'low-frequency-cutoff': args.f_lower, 
-            'tdi': '1.5',
+            'tdi': args.tdi_generation,
             't_offset': 0,
             'cutoff_deltat': 0,
             't_obs_start': int(tlen + 0.5),
@@ -586,18 +591,18 @@ def main():
 
         minimised_neg_stat, results = optimizer.optimize(
             compute_minus_network_snr,
-            iters=int(10),
+            iters=10,
             n_processes=None,
             **extra_args,
         )
 
         maximised_stat = -minimised_neg_stat
         if maximised_stat > stat:
-            logging.info("Statistic increased from %.1f to %.1f", stat, maximised_stat)
+            logger.info("Statistic increased from %.1f to %.1f", stat, maximised_stat)
         elif maximised_stat == stat:
-            logging.info("Statistic unchanged from %.1f", stat)
+            logger.info("Statistic unchanged from %.1f", stat)
         else:
-            logging.warning(
+            logger.warning(
                 "Statistic decreased from %.1f to %.1f - this shouldnt happen!",
                 stat,
                 maximised_stat
@@ -611,16 +616,8 @@ def main():
             for idx, parameter in enumerate(optimiser_parameters)
         })
 
-        maximised_mtotal = conv.mtotal_from_mchirp_eta(
+        maximised_mass1, maximised_mass2 = mass1_mass2_from_mchirp_eta(
             maximised_template['mchirp'],
-            maximised_template['eta']
-        )
-        maximised_mass1 = conv.mass1_from_mtotal_eta(
-            maximised_mtotal,
-            maximised_template['eta']
-        )
-        maximised_mass2 = conv.mass2_from_mass1_eta(
-            maximised_mass1,
             maximised_template['eta']
         )
         maximised_template['mass1'] = maximised_mass1
@@ -659,10 +656,9 @@ def main():
         maximised_template["tc"] = original_tlen
 
         # Get the waveform for the maximised point
-        maximised_wf = pycbc.waveform.get_fd_det_waveform(
+        maximised_wf = get_fd_waveform(
+            approximant=maximised_template['approximant'],
             **maximised_template,
-            channels=args.channels,
-            delta_t=delta_t,
             ifos=args.channels
         )
         full_coalescence_in_segment = coalescence_time_abs - float(original_data_epoch)

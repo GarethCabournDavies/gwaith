@@ -1,20 +1,23 @@
-import h5py
-
 import argparse
 import logging
+
+import h5py
 import numpy as np
 from matplotlib import use
+
 use('Agg')
 from matplotlib import pyplot as plt
+from gwaith.io import MultiDetOptionAction
 
-import pycbc
-from scipy.signal import find_peaks
-from pycbc.types import MultiDetOptionAction  # Custom action for argparse
+from hwilas import add_hwilas_common_options, init_logging
+
+
+logger = logging.getLogger(__name__)
 
 def main():
     parser = argparse.ArgumentParser()
 
-    pycbc.add_common_pycbc_options(parser)
+    add_hwilas_common_options(parser)
     parser.add_argument(
         "--trigger-merge-files",
         required=True,
@@ -46,15 +49,7 @@ def main():
 
     args = parser.parse_args()
 
-    logger = logging.getLogger(__name__)
-
-    # Initialize logging for the PyCBC library
-    if args.verbose is None:
-        # Lets have info logging on by default for now
-        pycbc.init_logging(1)
-    else:
-        # Adding --verbose adds to the debug logging
-        pycbc.init_logging(args.verbose + 1)
+    init_logging(args.verbose)
 
     template_ids = {}
     channels = set()
@@ -65,7 +60,7 @@ def main():
             template_ids[channel] = tids
             channels.update([channel])
 
-    channels = sorted(list(channels))
+    channels = sorted(channels)
 
     total_template_ids = set()
     for channel in channels:
@@ -110,7 +105,7 @@ def main():
         logger.info("Processing template %d", template_idx)
 
         this_template = {
-            channel: triggers[channels[i]]['template_id'] == template_idx
+            channel: triggers[channel]['template_id'] == template_idx
             for i, channel in enumerate(channels)
         }
 
@@ -128,7 +123,7 @@ def main():
                 logger.debug(
                     "Trigger at time %.1f in channel %s is within coincidence "
                     "window of trigger in %s at time %.1f",
-                    trigger_times_0[idx_one],
+                    time_0,
                     channels[0],
                     channels[1],
                     trigger_times_1[left],
@@ -139,7 +134,7 @@ def main():
                 coincident_triggers[f'trigger_id_{channels[1]}'].append(left)
                 # SNR and time could be got from indexing on the trigger merge files, but add these in so that
                 # everything is in one place - this may need updated later
-                coincident_triggers[f'time_{channels[0]}'].append(trigger_times_0[idx_one])
+                coincident_triggers[f'time_{channels[0]}'].append(time_0)
                 coincident_triggers[f'snr_{channels[0]}'].append(trigger_snrs_0[idx_one])
                 coincident_triggers[f'time_{channels[1]}'].append(trigger_times_1[left])
                 coincident_triggers[f'snr_{channels[1]}'].append(trigger_snrs_1[left])
@@ -151,13 +146,16 @@ def main():
                 )
 
     # Convert to numpy arrays
-    for key in coincident_triggers.keys():
+    for key, value in coincident_triggers:
         if any(key.startswith(s) for s in ['template_id', 'timeslide_id', 'trigger_id']):
             dtype = np.int32
         else:
             dtype = np.float32
-        coincident_triggers[key] = np.array(coincident_triggers[key], dtype=dtype)
-    logger.info("Found %d coincident triggers", len(coincident_triggers['template_id']))
+        value = np.array(value, dtype=dtype)
+    logger.info(
+        "Found %d coincident triggers",
+        len(coincident_triggers['template_id'])
+    )
 
     # Now lets do some clustering - cluster by qstatistic
     # For now the statistic is the quadratic sum of SNRs
@@ -171,7 +169,7 @@ def main():
     coinc_stat = (
         coincident_triggers[f'snr_{channels[0]}'] ** 2 + coincident_triggers[f'snr_{channels[1]}'] ** 2
     ) ** 0.5
-    coinc_tids = coincident_triggers['template_id'][:]
+    # coinc_tids = coincident_triggers['template_id'][:]
 
     n_coincs = len(coinc_time)
 
@@ -189,17 +187,17 @@ def main():
         keep[coinc_idx] = True
 
     clustered_coincident_triggers = {}
-    for key in coincident_triggers.keys():
+    for key in coincident_triggers:
         clustered_coincident_triggers[key] = coincident_triggers[key][keep]
 
     logger.info("%d out of %d coincidences remain after clustering", clustered_coincident_triggers['template_id'].size, n_coincs)
 
     logger.info("Outputting to file")
     with h5py.File(args.output_file, 'w') as output_trigger_file:
-        for key in clustered_coincident_triggers.keys():
+        for key, value in clustered_coincident_triggers:
             output_trigger_file.create_dataset(
                 key,
-                data=clustered_coincident_triggers[key],
+                data=value,
                 compression='gzip'
             )
 

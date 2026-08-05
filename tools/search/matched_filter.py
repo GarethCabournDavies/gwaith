@@ -1,33 +1,30 @@
 """
-This is a script to run the PyCBC matched filtering using a basic template bank search
+This is a script to run matched filtering using a basic template bank search
 """
 
 # Import necessary libraries
-import h5py  # Library for interacting with HDF5 files
 import argparse  # Library for parsing command-line arguments
 import logging  # Library for logging messages
-import numpy as np
 from matplotlib import pyplot as plt
+import h5py  # Library for interacting with HDF5 files
+import numpy as np
 
-
-# Import specific modules from the PyCBC library
-import pycbc
-import pycbc.psd
-from pycbc.types import TimeSeries
-# I am not sure if we need to remove these if people are so against PyCBC's licence
 from scipy.signal import find_peaks
+from gwaith.types import TimeSeries, FrequencySeries
 
-from hwilas.search_utils.utils import (
-    waveform_from_bank,
-)
+from hwilas import add_hwilas_common_options, init_logging
+from hwilas.filter import matched_filter_frequencyseries
+from hwilas.psd.read import from_txt as psd_from_txt
+from hwilas.template_banks.utils import waveform_from_bank
+from hwilas.waveforms import get_fd_waveform
 
+logger = logging.getLogger(__name__)
 
 def main():
-    logger = logging.getLogger(__name__)
 
     # Set up argument parser for command-line arguments
     parser = argparse.ArgumentParser()
-    pycbc.add_common_pycbc_options(parser)
+    add_hwilas_common_options(parser)
 
     # Add argument for the PSD files (required) with custom action for multiple detectors
     parser.add_argument(
@@ -90,6 +87,13 @@ def main():
         help="Window to use when clustering triggers, in seconds. Default 2 hours"
     )
 
+    parser.add_argument(
+        '--tdi-generation',
+        choices=['1.5','2'],
+        default="1.5",
+        help="Which generation of TDI to use when generating the waveform"
+    )
+
     parser.add_argument("--template-fraction-range", default="0/1",
                         help="Optional, analyze only part of template bank. Format"
                             " PART/NUM_PARTS")
@@ -118,13 +122,9 @@ def main():
     # Parse the command-line arguments provided by the user
     args = parser.parse_args()
 
-    # Initialize logging for the PyCBC library
-    if args.verbose is None:
-        # Lets have info logging on by default for now
-        pycbc.init_logging(1)
-    else:
-        # Adding --verbose adds to the debug logging
-        pycbc.init_logging(args.verbose + 1)
+    init_logging(args.verbose)
+
+    logger.info("Starting")
 
     # First, load in the data. Get from the file the information on when it starts, its length and its delta t
     # For now, this uses the sangria dataset, but we want to build a more sophisticated "get data" function, so that
@@ -137,37 +137,21 @@ def main():
             delta_t=delta_t,
             epoch=data_epoch,
         )
-        padding_duration = data_file.attrs['data_padding_duration']
+        padding_duration = data_file.attrs['padding_duration']
 
     original_dlen = len(data)
     tlen = original_dlen * delta_t
     delta_f = 1. / tlen
-    flen = tlen // 2 + 1
 
-    data_start_time = float(data._epoch)
+    data_start_time = float(data.epoch)
     data_end_time = data_start_time + tlen
 
     logger.info(f'Data from {data_start_time:.0f} to {data_end_time:.0f} (including padding)')
     logger.debug("Original data length: %d", original_dlen)
     padding_samples = int(padding_duration / delta_t)
 
-    valid_data_start = max(args.start_time, data_start_time + padding_duration)
-    valid_data_end = min(args.end_time, data_end_time + padding_duration)
-
-    # Set the defaults required for the waveform parameters
-    waveform_params_shared = {
-        'f_lower': args.f_lower,
-        'low-frequency-cutoff': 1e-6, 
-        'tdi': '1.5',
-        't_offset': 0,
-        'cutoff_deltat': 0,
-        't_obs_start': int(tlen * delta_t + 0.5),
-        'delta_f': delta_f,
-        'f_final': 1. / delta_t / 2 + delta_f / 2, # This is a hack to ensure we get the point at f_final returned
-        'approximant':'BBHX_PhenomD',
-        'mode_array':  [(2,2)],
-        'length': flen,
-    }
+    # valid_data_start = max(args.start_time, data_start_time + padding_duration)
+    # valid_data_end = min(args.end_time, data_end_time + padding_duration)
 
     # Ensure data has an odd length to avoid FFT length mismatches
     if len(data) % 2 == 0:
@@ -178,8 +162,24 @@ def main():
     delta_f = 1. / tlen
     flen = len(data) // 2 + 1
 
+    # Set the defaults required for the waveform parameters.
+    # Use the final (possibly padded) data length so FFT sizes are consistent.
+    waveform_params_shared = {
+        'f_lower': args.f_lower,
+        'low-frequency-cutoff': 1e-6,
+        'tdi': args.tdi_generation,
+        't_offset': 0,
+        'cutoff_deltat': 0,
+        't_obs_start': int(tlen + 0.5),
+        'delta_f': delta_f,
+        'f_final': 1. / delta_t / 2 + delta_f / 2, # This is a hack to ensure we get the point at f_final returned
+        'approximant': 'BBHX_PhenomHM',
+        'mode_array': [(2, 2)],
+        'length': int(flen),
+    }
+
     logger.info("Loading PSD")
-    psd = pycbc.psd.from_txt(
+    psd = psd_from_txt(
         args.psd_file,
         flen,
         delta_f,
@@ -187,20 +187,27 @@ def main():
         is_asd_file=False,
     )
 
+    psd = FrequencySeries(
+        psd.data,
+        delta_f=delta_f,
+    )
+
     # To avoid a division by zero error in the matched filter, we set the
     # low frequency bins of the PSD to infinity.
     psd.data[0] = np.inf
     psd.data[1] = np.inf
 
+    data_fs = data.to_frequencyseries()
+
     if args.testing_plots is not None:
-        whitened_data = (data.to_frequencyseries() / psd).to_timeseries()
+        whitened_data = (data_fs / psd).to_timeseries()
         fig, ax = plt.subplots()
         ax.plot(whitened_data.sample_times, whitened_data, label=f"whitened data {args.channel}")
         ax.legend(loc='upper right')
         fig.savefig(f'{args.testing_plots}/whitened_data_{args.channel}.png')
         plt.close(fig)
 
-    logger.info(f"Beginning filtering with bank %s", args.bank_file)
+    logger.info("Beginning filtering with bank %s", args.bank_file)
 
     output_triggers = {
         "template_id": [],
@@ -224,29 +231,45 @@ def main():
                 tlen
             )
 
-            logger.debug('Getting SNR series')
+            logger.debug('Getting waveform')
 
-            waveform = pycbc.waveform.get_fd_det_waveform(
+            waveform = get_fd_waveform(
                 ifos=[args.channel], **bank_wf_params
             )
 
-            snr_ts = pycbc.filter.matched_filter(
+            logger.debug('Computing SNR')
+            snr_ts = matched_filter_frequencyseries(
                 waveform[args.channel],
-                data,
-                psd=psd
+                data_fs,
+                psd=psd,
+                n_samples=len(data),
+                epoch=float(data.epoch),
             )
 
             # Zero out the corrupted data at the start and end of the time series
-            # so that we don't find any triggers there
+            # so that we don't mistakenly find any triggers there
 
             start_idx = padding_samples
             end_idx = len(snr_ts) - padding_samples
             snr_ts_data = snr_ts.data.copy()
             snr_ts_data[0:start_idx] = 0
             snr_ts_data[end_idx:] = 0
+
+            # Restrict output triggers to the requested absolute time window.
+            # This enables chunked-over-time orchestration while sharing one
+            # input data file.
+            sample_times = np.asarray(snr_ts.sample_times)
+            time_window = (
+                (sample_times >= float(args.start_time))
+                & (sample_times <= float(args.end_time))
+            )
+            snr_ts_data[~time_window] = 0
             snr_ts.data = snr_ts_data
             
             # Find peaks in the SNR timeseries
+            # Restrict output triggers to the requested absolute time window.
+            # This enables chunked-over-time orchestration while sharing one
+            # input data file.
             clustered_indices, _ = find_peaks(
                 abs(snr_ts.data),
                 height=args.snr_threshold,
@@ -283,8 +306,12 @@ def main():
 
     logger.info("Outputting to file")
     with h5py.File(args.output_file, 'w') as output_trigger_file:
-        for key in output_triggers.keys():
-            output_trigger_file.create_dataset(key, data=output_triggers[key], compression='gzip')
+        for key, value in output_triggers.items():
+            output_trigger_file.create_dataset(
+                key,
+                data=value,
+                compression='gzip'
+            )
 
     logger.info('Done!')
 

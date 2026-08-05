@@ -2,78 +2,53 @@
 
 import argparse
 import logging
-import numpy as np
 import h5py
-from matplotlib import pyplot as plt
-from matplotlib import use
-use('Agg')
+import numpy as np
 import copy
-
-import pycbc
-from pycbc import init_logging, add_common_pycbc_options
-from pycbc.types import TimeSeries
-import pycbc.waveform
-import pycbc.psd
-import pycbc.filter
-
-
-from pycbc.types import MultiDetOptionAction
-
-from ldc.waveform.lisabeta import FastBHB
-from ldc.lisa import orbits
 from astropy import units as un
 
-
 import ldc.io.hdf5 as hdfio
+from ldc.lisa import orbits
+from ldc.waveform.lisabeta import FastBHB
+
+from gwaith.io import MultiDetOptionAction
+
+from hwilas import add_hwilas_common_options, init_logging
+from hwilas.data_processing.utils import AET, to_timeseries
+from hwilas.filter import matched_filter_frequencyseries
+from hwilas.psd.read import from_txt as psd_from_txt
+from hwilas.waveforms import get_fd_waveform
+
 
 logger = logging.getLogger(__name__)
 
 
-lisa_orbits = orbits.Orbits.type(dict({"nominal_arm_length":2.5e9*un.m,
-                                       "initial_rotation":0*un.rad,
-                                       "initial_position":0*un.rad,
-                                       "orbit_type":"analytic"}))
+lisa_orbits = orbits.Orbits.type({
+    "nominal_arm_length":2.5e9*un.m,
+    "initial_rotation":0*un.rad,
+    "initial_position":0*un.rad,
+    "orbit_type":"analytic"}
+)
 
-def to_timeseries(waveform_dict, delta_t, epoch=0):
-    return_dict = {}
-    for channel, array in waveform_dict.items():
-        array_ts = TimeSeries(array, delta_t=delta_t, epoch=epoch)
-        return_dict[channel] = array_ts
-    return return_dict
-
-def AET(X,Y,Z, delta_t, epoch=0):
-    waveform_A = (Z - X)/np.sqrt(2.0)
-    waveform_E = (X - 2.0*Y + Z)/np.sqrt(6.0)
-    waveform_T =(X + Y + Z)/np.sqrt(3.0)
-
-    AET_ts = to_timeseries(
-        {
-            'LISA_A': waveform_A,
-            'LISA_E': waveform_E,
-            'LISA_T': waveform_T,
-        },
-        delta_t,
-        epoch=epoch
-    )
-
-    return AET_ts
 
 def load_ldc_timeseries(
     filename,
     data_group="obs/tdi",
-    remove_noiseless_groups=[],
+    remove_noiseless_groups=None,
     delta_t=5.
 ):
+
     tdi_ts, _ = hdfio.load_array(filename, name=data_group)
     X = tdi_ts['X']
     Y = tdi_ts['Y']
     Z = tdi_ts['Z']
 
-    for ng in remove_noiseless_groups:
-        tdi_to_rm, _ = hdfio.load_array(filename, name=ng)
-        X -= tdi_to_rm['X']
-        Y -= tdi_to_rm['Y']
-        Z -= tdi_to_rm['Z']
+    if remove_noiseless_groups is not None:
+        for ng in remove_noiseless_groups:
+            tdi_to_rm, _ = hdfio.load_array(filename, name=ng)
+            X -= tdi_to_rm['X']
+            Y -= tdi_to_rm['Y']
+            Z -= tdi_to_rm['Z']
 
     return AET(X,Y,Z, delta_t)
 
@@ -126,7 +101,7 @@ def generate_waveform_for_data(
 
 def main():
     parser = argparse.ArgumentParser()
-    add_common_pycbc_options(parser)
+    add_hwilas_common_options(parser)
     parser.add_argument(
         "--bank-file",
         required=True,
@@ -160,6 +135,12 @@ def main():
         required=True,
         help="File to store output optimal SNR and Fitting Factors"
     )
+    parser.add_argument(
+        "--tdi-generation",
+        choices=["1.5", "2"],
+        default="1.5",
+        help="Which generation of TDI is used to calculate the waveforms"
+    )
 
     args = parser.parse_args()
 
@@ -191,7 +172,7 @@ def main():
 
     logger.info("Loading PSD")
     psds = {
-        channel: pycbc.psd.from_txt(
+        channel: psd_from_txt(
             args.psd_files[channel],
             flen,
             delta_f,
@@ -219,18 +200,22 @@ def main():
         mbhb_data[i] = waveform_for_removal
 
         logger.debug("Calculating Optimal SNR")
-        A_snr = pycbc.filter.matched_filter(
-            waveform_for_removal['LISA_A'],
-            waveform_for_removal['LISA_A'],
-            psd=psds['LISA_A']
+        A_snr = matched_filter_frequencyseries(
+            waveform_for_removal['LISA_A'].to_frequencyseries(),
+            waveform_for_removal['LISA_A'].to_frequencyseries(),
+            psd=psds['LISA_A'],
+            n_samples=len(waveform_for_removal['LISA_A']),
+            epoch=float(waveform_for_removal['LISA_A'].epoch),
         )
-        E_snr = pycbc.filter.matched_filter(
-            waveform_for_removal['LISA_E'],
-            waveform_for_removal['LISA_E'],
-            psd=psds['LISA_E']
+        E_snr = matched_filter_frequencyseries(
+            waveform_for_removal['LISA_E'].to_frequencyseries(),
+            waveform_for_removal['LISA_E'].to_frequencyseries(),
+            psd=psds['LISA_E'],
+            n_samples=len(waveform_for_removal['LISA_E']),
+            epoch=float(waveform_for_removal['LISA_E'].epoch),
         )
 
-        snr = abs(A_snr._data ** 2 + E_snr._data ** 2) ** 0.5
+        snr = abs(A_snr.data ** 2 + E_snr.data ** 2) ** 0.5
 
         logger.info("Optimal SNR for signal %d: %.3f", i, np.max(snr))
         optimal_snrs[i] = np.max(snr)
@@ -238,7 +223,7 @@ def main():
     waveform_params_shared = {
         'f_lower': 1e-6,
         'low-frequency-cutoff': 1e-6, 
-        'tdi': '1.5',
+        'tdi': args.tdi_generation,
         't_offset': 0,
         'cutoff_deltat': 0,
         't_obs_start': int(args.waveform_start + args.waveform_end),
@@ -273,24 +258,29 @@ def main():
             }
         )
         
-        wf = pycbc.waveform.get_fd_det_waveform(
+        wf = get_fd_waveform(
+            approximant=wf_params['approximant'],
             **wf_params,
             ifos=['LISA_A', 'LISA_E'],
         )
 
         for i, mbhb in enumerate(mbhbs):
-            A_snr = pycbc.filter.matched_filter(
+            A_snr = matched_filter_frequencyseries(
                 wf['LISA_A'],
-                mbhb_data[i]['LISA_A'],
-                psd=psds['LISA_A']
+                mbhb_data[i]['LISA_A'].to_frequencyseries(),
+                psd=psds['LISA_A'],
+                n_samples=len(mbhb_data[i]['LISA_A']),
+                epoch=float(mbhb_data[i]['LISA_A'].epoch),
             )
-            E_snr = pycbc.filter.matched_filter(
+            E_snr = matched_filter_frequencyseries(
                 wf['LISA_E'],
-                mbhb_data[i]['LISA_E'],
-                psd=psds['LISA_E']
+                mbhb_data[i]['LISA_E'].to_frequencyseries(),
+                psd=psds['LISA_E'],
+                n_samples=len(mbhb_data[i]['LISA_E']),
+                epoch=float(mbhb_data[i]['LISA_E'].epoch),
             )
 
-            snr = abs(A_snr._data ** 2 + E_snr._data ** 2) ** 0.5
+            snr = abs(A_snr.data ** 2 + E_snr.data ** 2) ** 0.5
             ff = np.max(snr) / optimal_snrs[i]
             if ff > 1:
                 # This shouldnt happen - warn and carry on

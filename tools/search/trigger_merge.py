@@ -2,21 +2,23 @@
 "Apply per-template clustering"
 
 import argparse
-import h5py
 import logging
-import numpy as np
 
+import h5py
+import numpy as np
 from matplotlib import pyplot as plt
 from matplotlib import use
+
 use('Agg')
 
-import pycbc
+
+from hwilas import add_hwilas_common_options, init_logging
 
 logger = logging.getLogger(__name__)
 
 def main():
     parser = argparse.ArgumentParser()
-    pycbc.add_common_pycbc_options(parser)
+    add_hwilas_common_options(parser)
     parser.add_argument(
         "--trigger-files",
         nargs='+',
@@ -32,34 +34,73 @@ def main():
         "--testing-plot",
         help="Generate plots used for testing in this file"
     )
+    parser.add_argument(
+        "--cluster-window",
+        type=float,
+        default=7200.0,
+        help="Cluster triggers per template within this time window in seconds"
+    )
 
     args = parser.parse_args()
 
-    pycbc.init_logging(args.verbose)
+    init_logging(args.verbose)
 
-    unique_template_ids = set()
-    template_ids_per_file = {}
+    all_tids = []
+    all_times = []
+    all_snrs = []
 
-    n_triggers = 0
-
-    # First - find out how many triggers there are as a total in all files
     for trigger_filename in args.trigger_files:
         logger.info("Processing file %s", trigger_filename)
         with h5py.File(trigger_filename, 'r') as trigger_file:
-            template_ids = np.unique(trigger_file['template_id'])
-            n_triggers += trigger_file['template_id'].size
-            template_ids_per_file[trigger_filename] = list(template_ids)
-            unique_template_ids.update(template_ids)
+            all_tids.append(trigger_file['template_id'][:])
+            all_times.append(trigger_file['end_time'][:])
+            all_snrs.append(trigger_file['snr'][:])
 
+    if len(all_tids) == 0:
+        raise ValueError("No trigger files provided")
 
-    logger.info("Total template ids: %d", len(unique_template_ids))
-    logger.info("Total triggers: %d", n_triggers)
+    merged_tids = np.concatenate(all_tids).astype(np.int32, copy=False)
+    merged_times = np.concatenate(all_times).astype(np.float64, copy=False)
+    merged_snrs = np.concatenate(all_snrs).astype(np.float64, copy=False)
 
-    curr_size = 0
+    logger.info("Total template ids before clustering: %d", np.unique(merged_tids).size)
+    logger.info("Total triggers before clustering: %d", merged_tids.size)
+
+    # Sort by template id then time so downstream coincidence searchsorted logic
+    # sees monotonic per-template times.
+    order = np.lexsort((merged_times, merged_tids))
+    merged_tids = merged_tids[order]
+    merged_times = merged_times[order]
+    merged_snrs = merged_snrs[order]
+
+    keep = np.zeros(merged_tids.size, dtype=bool)
+    for template_id in np.unique(merged_tids):
+        indices = np.where(merged_tids == template_id)[0]
+        if indices.size == 0:
+            continue
+        times = merged_times[indices]
+        snrs = merged_snrs[indices]
+        local_keep = np.ones(indices.size, dtype=bool)
+        loudest_first = np.argsort(snrs)[::-1]
+        for local_idx in loudest_first:
+            if not local_keep[local_idx]:
+                continue
+            within = np.abs(times - times[local_idx]) < args.cluster_window
+            local_keep[within] = False
+            local_keep[local_idx] = True
+        keep[indices[local_keep]] = True
+
+    merged_tids = merged_tids[keep]
+    merged_times = merged_times[keep]
+    merged_snrs = merged_snrs[keep]
+
+    logger.info("Total triggers after clustering: %d", merged_tids.size)
+
     if args.testing_plot is not None:
         fig, ax = plt.subplots()
 
     with h5py.File(args.output_file, 'w') as output_file:
+        n_triggers = merged_tids.size
         tid_ds = output_file.create_dataset(
             "template_id",
             shape=(n_triggers,),
@@ -78,27 +119,17 @@ def main():
             dtype=float,
             compression='gzip',
         )
+        tid_ds[:] = merged_tids
+        time_ds[:] = merged_times
+        snr_ds[:] = merged_snrs
 
-        for trigger_filename in args.trigger_files:
-            with h5py.File(trigger_filename, 'r') as trigger_file:
-                trigger_tids = trigger_file['template_id'][:]
-                trigger_times = trigger_file['end_time'][:]
-                trigger_snrs = trigger_file['snr'][:]
-                this_filesize = trigger_snrs.size
-
-                tid_ds[curr_size:curr_size + this_filesize] = trigger_tids
-                time_ds[curr_size:curr_size + this_filesize] = trigger_times
-                snr_ds[curr_size:curr_size + this_filesize] = trigger_snrs
-
-            if args.testing_plot is not None:
-                ax.scatter(
-                    trigger_times,
-                    trigger_snrs,
-                    c=trigger_tids,
-                    alpha=0.1,
-                )
-
-            curr_size += this_filesize
+        if args.testing_plot is not None and n_triggers > 0:
+            ax.scatter(
+                merged_times,
+                merged_snrs,
+                c=merged_tids,
+                alpha=0.1,
+            )
 
     if args.testing_plot is not None:
         fig.savefig(args.testing_plot)

@@ -3,26 +3,28 @@ Add padding to either end of the data and inpaint into them and any gaps
 """
 
 import argparse
-import h5py
-import logging
-import numpy as np
 import copy
+import logging
+
+import h5py
+import numpy as np
 from matplotlib import pyplot as plt
 from matplotlib import use
+
 use('Agg')
 
-import pycbc
+from gwaith.types import TimeSeries
 
-from hwilas.search_utils.utils import (
-    load_sangria_timeseries,
-    apply_inpainting
-)
+from hwilas import add_hwilas_common_options, init_logging
+from hwilas.data_processing.inpainting import apply_inpainting
+from hwilas.data_processing.sangria import load_sangria_timeseries
+from hwilas.psd.read import from_txt as psd_from_txt
 
 logger = logging.getLogger(__name__)
 
 def main():
     parser = argparse.ArgumentParser()
-    pycbc.add_common_pycbc_options(parser)
+    add_hwilas_common_options(parser)
     parser.add_argument(
         "--data-file",
         required=True,
@@ -71,7 +73,7 @@ def main():
 
     args = parser.parse_args()
 
-    pycbc.init_logging(args.verbose)
+    init_logging(args.verbose)
 
     logger.info("Loading data from %s", args.data_file)
 
@@ -84,18 +86,18 @@ def main():
     delta_t = data[args.channels[0]].delta_t
     data_tlen = len(data[args.channels[0]]) * delta_t
     data_end_time = data_start_time + data_tlen
-    data_flen = data_tlen // 2 + 1
-    data_delta_f = 1. / data_tlen
+    # data_flen = data_tlen // 2 + 1
+    # data_delta_f = 1. / data_tlen
 
     logger.info("Padding Data")
     padding_samples = int(args.padding_duration / delta_t)
     padded_tlen = data_tlen + 2 * args.padding_duration
     padded_dlen = int(padded_tlen / delta_t)
-    padded_flen = padded_dlen // 2 + 1
-    padded_delta_f = 1. / padded_tlen
+    # padded_flen = padded_dlen // 2 + 1
+    # padded_delta_f = 1. / padded_tlen
 
     padded_data = {
-        channel:pycbc.types.TimeSeries(
+        channel:TimeSeries(
             np.zeros(padded_dlen, dtype=dtype),
             delta_t=delta_t,
             epoch=data_start_time - args.padding_duration
@@ -124,13 +126,13 @@ def main():
             padded_data[channel][start_idx:end_idx] = 0
 
     logger.info("Loading PSD")
-    padded_psd = pycbc.psd.from_txt(
-        args.psd_file,
-        padded_flen,
-        padded_delta_f,
-        padded_delta_f,
-        is_asd_file=False,
-    )
+    # padded_psd = psd_from_txt(
+    #     args.psd_file,
+    #     padded_flen,
+    #     padded_delta_f,
+    #     padded_delta_f,
+    #     is_asd_file=False,
+    # )
 
     # The padded data should be kept rather than overwritten
     inpainted_data = copy.deepcopy(padded_data)
@@ -165,7 +167,7 @@ def main():
     ends_flen = ends_dlen // 2 + 1
     ends_delta_f = 1. / ends_tlen
 
-    ends_psd = pycbc.psd.from_txt(
+    ends_psd = psd_from_txt(
         args.psd_file,
         ends_flen,
         ends_delta_f,
@@ -196,11 +198,14 @@ def main():
         inpainted_data[channel].data[padded_dlen-padding_samples:padded_dlen] = inpainted_end.data[ends_dlen - padding_samples:ends_dlen]
 
 
-    if args.gaps is not None:
-        for start, end in args.gaps:
-            gap_section_start_idx = int((start - inpainted_data[channel]._epoch) / delta_t)
-            gap_section_end_idx = int((end - inpainted_data[channel]._epoch) / delta_t)
-            gap_section = padded_data[channel][gap_section_start_idx - 2 * padding_samples:gap_section_end_idx + 2 * padding_samples]
+    # if args.gaps is not None:
+    #     for start, end in args.gaps:
+    #         gap_section_start_idx = int((start - inpainted_data[channel]._epoch) / delta_t)
+    #         gap_section_end_idx = int((end - inpainted_data[channel]._epoch) / delta_t)
+    #         gap_section = padded_data[channel][gap_section_start_idx - 2 * padding_samples:gap_section_end_idx + 2 * padding_samples]
+    #         inpainted_data[channel][gap_section_start_idx:gap_section_end_idx] = 
+
+
 
     logger.info("Saving data to %s", args.output_file)
 

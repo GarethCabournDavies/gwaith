@@ -1,3 +1,7 @@
+set -e
+
+mkdir -p output
+
 python ./pycbc_brute_bank \
     --verbose \
     --minimal-match 0.9 \
@@ -13,7 +17,7 @@ python ./pycbc_brute_bank \
     --input-config config.ini \
     --seed 1 \
     --output-file output/sangria_bank.hdf \
-    --psd-file ../psd_estimation/A_sangria_hm_SMOOTHED_PSD.txt \
+    --psd-file ../psd_estimation/output/A_sangria_hm_SMOOTHED_PSD.txt \
     --low-frequency-cutoff .000001
 
 hwilas_plot_bank \
