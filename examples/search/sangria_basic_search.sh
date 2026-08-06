@@ -1,74 +1,151 @@
 set -e
 
-# mkdir -p output/data_processing 
-
-# hwilas_process_sangria_data \
-#   --data-file ../datasets/LDC2_sangria_hm_training.hdf \
-#   --psd-file ../psd_estimation/output/A_sangria_hm_SMOOTHED_PSD.txt \
-#   --output-file output/data_processing/LDC2_sangria_hm_training_padded.hdf \
-#   --padding-duration 2592000 \
-#   --verbose \
-#   --testing-plots output/data_processing 
-
 template_parallelization=15
-mkdir -p output/round_0/matched_filter
-for template_range in $(seq 0 $((${template_parallelization} - 1))) ; do
-  echo ${template_range}/${template_parallelization}
-  echo "Channel A"
-  hwilas_matched_filter \
-    --verbose \
-    --start-time 0 \
-    --end-time 6280000 \
-    --bank-file ../template_banks/output/sangria_bank.hdf \
-    --psd-file ../psd_estimation/output/A_sangria_hm_SMOOTHED_PSD.txt \
-    --input-data-file output/data_processing/LDC2_sangria_hm_training_padded.hdf \
-    --channel LISA_A \
-    --output-file output/round_0/matched_filter/matched_filter_snr_peaks_A_${template_range}.hdf \
-    --template-fraction-range ${template_range}/${template_parallelization} \
-    --testing-plots output/round_0/matched_filter
 
-  echo "Channel E"
-  hwilas_matched_filter \
-    --verbose \
-    --start-time 0 \
-    --end-time 6280000 \
-    --bank-file ../template_banks/output/sangria_bank.hdf \
-    --psd-file ../psd_estimation/output/E_sangria_hm_SMOOTHED_PSD.txt \
-    --input-data-file output/data_processing/LDC2_sangria_hm_training_padded.hdf \
-    --channel LISA_E \
-    --output-file output/round_0/matched_filter/matched_filter_snr_peaks_E_${template_range}.hdf \
-    --template-fraction-range ${template_range}/${template_parallelization} \
-    --testing-plots output/round_0/matched_filter
+total_data_duration=$((365 * 86400)) # 1 year in seconds
+chunk_duration=$((60 * 86400))       # 2 months in seconds
+overlap_duration=$((30 * 86400))     # 30 days in seconds
+padding_for_process_data=$((30 * 86400)) # Padding for hwilas_process_sangria_data, e.g., 30 days
+
+current_analysis_start_time=0
+chunk_idx=0
+
+matched_filter_job_ids=()
+
+while (( $(echo "$current_analysis_start_time < $total_data_duration" | bc -l) )); do
+  analysis_end_time=$(echo "$current_analysis_start_time + $chunk_duration" | bc -l)
+  # Ensure the last chunk doesn't go beyond the total data duration
+  if (( $(echo "$analysis_end_time > $total_data_duration" | bc -l) )); then
+    analysis_end_time=$total_data_duration
+  fi
+
+  echo "--- Processing Chunk ${chunk_idx} (Analysis Window: ${current_analysis_start_time}s to ${analysis_end_time}s) ---"
+
+  chunk_output_dir="output/round_0/chunk_${chunk_idx}"
+  mkdir -p "${chunk_output_dir}/data_processing"
+  mkdir -p "${chunk_output_dir}/matched_filter"
+  mkdir -p "${chunk_output_dir}/logs"
+
+  # 1. Process Sangria Data for this chunk
+  echo "Running hwilas_process_sangria_data for chunk ${chunk_idx}"
+  hwilas_process_sangria_data \
+    --data-file ../datasets/LDC2_sangria_hm_training.hdf \
+    --psd-file ../psd_estimation/output/A_sangria_hm_SMOOTHED_PSD.txt \
+    --output-file "${chunk_output_dir}/data_processing/LDC2_sangria_hm_training_padded.hdf" \
+    --padding-duration "${padding_for_process_data}" \
+    --analysis-start-time "${current_analysis_start_time}" \
+    --analysis-end-time "${analysis_end_time}" \
+    --verbose --verbose \
+    --testing-plots "${chunk_output_dir}/data_processing"
+
+  # 2. Submit Matched Filter Job Array for Channel A
+  echo "Submitting Matched Filter Job Array for Channel A (Chunk ${chunk_idx})"
+  job_id_A=$(sbatch --parsable \
+    --job-name="mf_A_chunk${chunk_idx}" \
+    --output="${chunk_output_dir}/logs/mf_A_%a_%j.out" \
+    --error="${chunk_output_dir}/logs/mf_A_%a_%j.err" \
+    --array=0-$((${template_parallelization} - 1)) \
+    --wrap "hwilas_matched_filter_search \
+      --verbose \
+      --bank-file ../template_banks/output/sangria_bank.hdf \
+      --psd-file ../psd_estimation/output/A_sangria_hm_SMOOTHED_PSD.txt \
+      --input-data-file "${chunk_output_dir}/data_processing/LDC2_sangria_hm_training_padded.hdf" \
+      --channel LISA_A \
+      --output-file "${chunk_output_dir}/matched_filter/matched_filter_snr_peaks_A_\${SLURM_ARRAY_TASK_ID}.hdf" \
+      --template-fraction-range \${SLURM_ARRAY_TASK_ID}/${template_parallelization} \
+      --testing-plots "${chunk_output_dir}/matched_filter" ")
+  matched_filter_job_ids+=("$job_id_A")
+
+  # 3. Submit Matched Filter Job Array for Channel E
+  echo "Submitting Matched Filter Job Array for Channel E (Chunk ${chunk_idx})"
+  job_id_E=$(sbatch --parsable \
+    --job-name="mf_E_chunk${chunk_idx}" \
+    --output="${chunk_output_dir}/logs/mf_E_%a_%j.out" \
+    --error="${chunk_output_dir}/logs/mf_E_%a_%j.err" \
+    --array=0-$((${template_parallelization} - 1)) \
+    --wrap "hwilas_matched_filter_search \
+      --verbose \
+      --bank-file ../template_banks/output/sangria_bank.hdf \
+      --psd-file ../psd_estimation/output/E_sangria_hm_SMOOTHED_PSD.txt \
+      --input-data-file "${chunk_output_dir}/data_processing/LDC2_sangria_hm_training_padded.hdf" \
+      --channel LISA_E \
+      --output-file "${chunk_output_dir}/matched_filter/matched_filter_snr_peaks_E_\${SLURM_ARRAY_TASK_ID}.hdf" \
+      --template-fraction-range \${SLURM_ARRAY_TASK_ID}/${template_parallelization} \
+      --testing-plots "${chunk_output_dir}/matched_filter" ")
+  matched_filter_job_ids+=("$job_id_E")
+
+  # Update for next chunk
+  current_analysis_start_time=$(echo "$current_analysis_start_time + $chunk_duration - $overlap_duration" | bc -l)
+  chunk_idx=$((chunk_idx + 1))
 done
 
-# files_A=$( ls $(pwd)/output/round_0/matched_filter/matched_filter_snr_peaks_A_*.hdf )
-# files_E=$( ls $(pwd)/output/round_0/matched_filter/matched_filter_snr_peaks_E_*.hdf )
+if [ ${#matched_filter_job_ids[@]} -eq 0 ]; then
+  echo "No matched-filter jobs were submitted."
+  exit 1
+fi
 
-# mkdir -p output/round_0/trigger_merge
-# hwilas_trigger_merge \
-#   --verbose \
-#   --trigger-files $files_A \
-#   --output-file output/round_0/trigger_merge/trigger_merge_A.hdf \
-#   --cluster-window 2592000 \
-#   --testing-plot output/round_0/trigger_merge/trigger_merge_A.png 
+joined_job_ids=$(IFS=,; echo "${matched_filter_job_ids[*]}") # Join all job IDs with commas
+echo "Monitoring $((${#matched_filter_job_ids[@]} * ${template_parallelization})) tasks across job arrays: ${joined_job_ids}"
+echo "Waiting for matched-filter Slurm jobs to finish: ${joined_job_ids}"
+while true; do
+  active_jobs=0
+  for job_id in "${matched_filter_job_ids[@]}"; do
+    # squeue -h -j "$job_id" will list all tasks for that specific job array
+    active_jobs=$((active_jobs + $(squeue -h -r -j "$job_id" | wc -l)))
+  done
+  if [ "${active_jobs}" -eq 0 ]; then
+    break
+  fi
+  echo "${active_jobs} total matched-filter jobs (from all chunks and channels) still running/pending..."
+  sleep 30
+done
 
-# hwilas_trigger_merge \
-#   --verbose \
-#   --trigger-files $files_E \
-#   --output-file output/round_0/trigger_merge/trigger_merge_E.hdf \
-#   --cluster-window 2592000 \
-#   --testing-plot output/round_0/trigger_merge/trigger_merge_E.png 
+echo "All matched-filter Slurm jobs have finished."
 
-# mkdir -p output/round_0/coincidence
+shopt -s nullglob
+files_A=(output/round_0/chunk_*/matched_filter/matched_filter_snr_peaks_A_*.hdf)
+files_E=(output/round_0/chunk_*/matched_filter/matched_filter_snr_peaks_E_*.hdf)
+shopt -u nullglob
 
-# hwilas_coincidence \
-#   --trigger-merge-files \
-#     LISA_A:output/round_0/trigger_merge/trigger_merge_A.hdf \
-#     LISA_E:output/round_0/trigger_merge/trigger_merge_E.hdf \
-#   --output-file output/round_0/coincidence/coincidence.hdf \
-#   --coincidence-window 3600 \
-#   --testing-plots output/round_0/coincidence \
-#   --expected-snr-file optimal_snr/optimal_snr_fitting_factors.hdf
+echo $files_A
+echo $files_E
+
+
+if [ ${#files_A[@]} -eq 0 ] || [ ${#files_E[@]} -eq 0 ]; then
+  echo "Missing matched-filter output files after Slurm completion."
+  echo "Check logs in output/round_0/logs"
+  exit 1
+fi
+
+mkdir -p output/round_0/trigger_merge
+mkdir -p output/round_0/trigger_merge
+hwilas_trigger_merge \
+  --verbose \
+  --trigger-files "${files_A[@]}" \
+  --output-file output/round_0/trigger_merge/trigger_merge_A.hdf \
+  --cluster-window 2592000 \
+  --testing-plot output/round_0/trigger_merge/trigger_merge_A.png 
+
+hwilas_trigger_merge \
+  --verbose \
+  --trigger-files "${files_E[@]}" \
+  --output-file output/round_0/trigger_merge/trigger_merge_E.hdf \
+  --cluster-window 2592000 \
+  --testing-plot output/round_0/trigger_merge/trigger_merge_E.png 
+
+mkdir -p output/round_0/coincidence
+
+hwilas_coincidence \
+  --trigger-merge-files \
+    LISA_A:output/round_0/trigger_merge/trigger_merge_A.hdf \
+    LISA_E:output/round_0/trigger_merge/trigger_merge_E.hdf \
+  --output-file output/round_0/coincidence/coincidence.hdf \
+  --coincidence-window 3600 \
+  --testing-plots output/round_0/coincidence \
+  --expected-snr-file optimal_snr/optimal_snr_fitting_factors.hdf
+
+# The rest of the script (optimise, subtract, round_1) would follow a similar chunking logic
+# if it were to be enabled. For now, I'll leave them commented out as they were.
 
 # mkdir -p output/round_0/optimise
 

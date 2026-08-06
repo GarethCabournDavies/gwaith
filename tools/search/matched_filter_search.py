@@ -43,7 +43,7 @@ def main():
 
     parser.add_argument(
         '--start-time',
-        required=True,
+        required=False,
         type=float,
         help="This is the start time being considered for triggers "
             "from the matched filter. Uses data start time if this is smaller"
@@ -51,7 +51,7 @@ def main():
 
     parser.add_argument(
         '--end-time',
-        required=True,
+        required=False,
         type=float,
         help="This is the end time being considered for triggers "
             "from the matched filter. Uses data end time if this is larger"
@@ -137,7 +137,7 @@ def main():
             delta_t=delta_t,
             epoch=data_epoch,
         )
-        padding_duration = data_file.attrs['padding_duration']
+        padding_duration_from_file = float(data_file.attrs.get('padding_duration', 0.0))
 
     original_dlen = len(data)
     tlen = original_dlen * delta_t
@@ -148,7 +148,30 @@ def main():
 
     logger.info(f'Data from {data_start_time:.0f} to {data_end_time:.0f} (including padding)')
     logger.debug("Original data length: %d", original_dlen)
-    padding_samples = int(padding_duration / delta_t)
+    if (args.start_time is None) != (args.end_time is None):
+        raise ValueError("Provide both --start-time and --end-time, or neither.")
+
+    if args.start_time is not None and args.end_time is not None:
+        requested_start_time = float(args.start_time)
+        requested_end_time = float(args.end_time)
+    else:
+        effective_padding = padding_duration_from_file
+        requested_start_time = data_start_time + effective_padding
+        requested_end_time = data_end_time - effective_padding
+
+    valid_start_time = max(requested_start_time, data_start_time)
+    valid_end_time = min(requested_end_time, data_end_time)
+    if valid_end_time <= valid_start_time:
+        raise ValueError(
+            f"Invalid analysis window [{valid_start_time}, {valid_end_time}]. "
+            "Check start/end inputs or the padding_duration attribute in the input file."
+        )
+
+    logger.info(
+        "Filtering window: %.0f to %.0f",
+        valid_start_time,
+        valid_end_time,
+    )
 
     # valid_data_start = max(args.start_time, data_start_time + padding_duration)
     # valid_data_end = min(args.end_time, data_end_time + padding_duration)
@@ -168,9 +191,9 @@ def main():
         'f_lower': args.f_lower,
         'low-frequency-cutoff': 1e-6,
         'tdi': args.tdi_generation,
-        't_offset': 0,
+        't_offset': 0, # This is an internal BBHx parameter, not related to physical duration
         'cutoff_deltat': 0,
-        't_obs_start': int(tlen + 0.5),
+        't_obs_start': 30 * 86400.0, # Generate 30 days of physical waveform
         'delta_f': delta_f,
         'f_final': 1. / delta_t / 2 + delta_f / 2, # This is a hack to ensure we get the point at f_final returned
         'approximant': 'BBHX_PhenomHM',
@@ -246,43 +269,34 @@ def main():
                 epoch=float(data.epoch),
             )
 
-            # Zero out the corrupted data at the start and end of the time series
-            # so that we don't mistakenly find any triggers there
+            # Restrict to a contiguous valid time interval by truncation.
+            # This avoids artificially flat zero regions in diagnostic plots.
+            start_idx = int(np.ceil((valid_start_time - float(snr_ts.epoch)) / delta_t))
+            end_idx = int(np.floor((valid_end_time - float(snr_ts.epoch)) / delta_t)) + 1
+            start_idx = max(0, start_idx)
+            end_idx = min(len(snr_ts), end_idx)
 
-            start_idx = padding_samples
-            end_idx = len(snr_ts) - padding_samples
-            snr_ts_data = snr_ts.data.copy()
-            snr_ts_data[0:start_idx] = 0
-            snr_ts_data[end_idx:] = 0
+            if end_idx <= start_idx:
+                logger.debug("No valid SNR samples remain for template %d", template_idx)
+                continue
 
-            # Restrict output triggers to the requested absolute time window.
-            # This enables chunked-over-time orchestration while sharing one
-            # input data file.
-            sample_times = np.asarray(snr_ts.sample_times)
-            time_window = (
-                (sample_times >= float(args.start_time))
-                & (sample_times <= float(args.end_time))
-            )
-            snr_ts_data[~time_window] = 0
-            snr_ts.data = snr_ts_data
+            snr_times = np.asarray(snr_ts.sample_times)[start_idx:end_idx]
+            snr_data = np.asarray(snr_ts.data)[start_idx:end_idx]
             
             # Find peaks in the SNR timeseries
-            # Restrict output triggers to the requested absolute time window.
-            # This enables chunked-over-time orchestration while sharing one
-            # input data file.
             clustered_indices, _ = find_peaks(
-                abs(snr_ts.data),
+                abs(snr_data),
                 height=args.snr_threshold,
                 distance=int(args.cluster_window / delta_t)
             )
 
-            snrs_out = abs(snr_ts.data[clustered_indices])
-            times_out = snr_ts.sample_times[clustered_indices]
+            snrs_out = abs(snr_data[clustered_indices])
+            times_out = snr_times[clustered_indices]
             logger.debug("%d triggers remain after clustering", len(clustered_indices))
 
             if args.testing_plots is not None:
                 fig, ax = plt.subplots()
-                ax.plot(snr_ts.sample_times / 86400, abs(snr_ts.data))
+                ax.plot(snr_times / 86400, abs(snr_data))
                 ax.scatter(
                     times_out / 86400,
                     snrs_out,

@@ -13,11 +13,18 @@ dependencies = [
 	"bbhx",
 	"scipy",
 	"matplotlib",
+	"gwaith",
+]
+
+[project.optional-dependencies]
+test = [
+	"pytest",
+	"pycbc",
 ]
 
 [project.scripts]
 hwilas_coincidence = "tools.search.coincidence:main"
-hwilas_matched_filter = "tools.search.matched_filter:main"
+hwilas_matched_filter_search = "tools.search.matched_filter_search:main"
 hwilas_optimise_snr_peaks = "tools.search.optimise_snr_peaks:main"
 hwilas_process_sangria_data = "tools.data_processing.process_sangria_data:main"
 hwilas_process_mojito_data = "tools.data_processing.process_mojito_data:main"
