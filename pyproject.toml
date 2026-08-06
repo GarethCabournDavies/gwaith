@@ -13,7 +13,7 @@ dependencies = [
 	"bbhx",
 	"scipy",
 	"matplotlib",
-	"gwaith",
+	"gwaith @ git+https://github.com/uk-lisa-gs/gwaith.git",
 ]
 
 [project.optional-dependencies]

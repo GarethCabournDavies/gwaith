@@ -18,6 +18,9 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Configure git for private repositories
+        run: git config --global url."https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/".insteadOf "https://github.com/"
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
