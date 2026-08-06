@@ -1,25 +1,26 @@
-import h5py
-import logging
-import numpy as np
 import argparse
-from scipy.signal.windows import hann
+import logging
+
+import numpy as np
 from matplotlib import pyplot as plt
 from matplotlib import use
+
 use('Agg')
 
 import ldc.io.hdf5 as hdfio
 
-import pycbc
-from pycbc.types import TimeSeries, FrequencySeries
-from pycbc.psd import interpolate
-from pycbc.types import MultiDetOptionAction
+from gwaith.types import TimeSeries
+from gwaith.io import KeyValueOptionAction
 
+from hwilas import add_hwilas_common_options, init_logging
+from hwilas.psd.interpolate import interpolate
+from hwilas.psd_estimation.smooth import add_smoothing_options, smooth_psd
 
 logger = logging.getLogger(__name__)
 
 def load_arguments():
     parser = argparse.ArgumentParser()
-    pycbc.add_common_pycbc_options(parser)
+    add_hwilas_common_options(parser)
     parser.add_argument(
         "--data-file",
         required=True,
@@ -33,33 +34,22 @@ def load_arguments():
     parser.add_argument(
         "--output-file",
         required=True,
-        action=MultiDetOptionAction,
+        action=KeyValueOptionAction,
         help="Output files for each channel, given as channel:filename pairs"
     )
     parser.add_argument(
         "--testing-plots",
         help="Directory to store plots used for testing"
     )
-    def gap_pair(s):
-        try:
-            # Splits "1e-2,0.1" into (0.01, 0.1)
-            start, end = map(float, s.split(','))
-            return (start, end)
-        except ValueError:
-            raise argparse.ArgumentTypeError("Gaps must be start,end (e.g., 1e-2,0.1)")
+    add_smoothing_options(parser)
 
-    parser.add_argument(
-        "--smooth-regions",
-        type=gap_pair,
-        nargs='+',
-    )
     return parser.parse_args()
 
 
 def main():
     args = load_arguments()
 
-    pycbc.init_logging(args.verbose)
+    init_logging(args.verbose)
 
     logger.info("Loading Sangria dataset")
 
@@ -107,12 +97,25 @@ def main():
         for channel in channels
     }
 
+    channel_colours = {
+        "LISA_A": "tab:blue",
+        "LISA_E": "tab:orange",
+        "LISA_T": "tab:green"
+    }
+    smoothed_colours = {
+        "LISA_A": "tab:red",
+        "LISA_E": "tab:pink",
+        "LISA_T": "tab:olive"
+    }
+
+
     logger.info("Plotting PSDs")
     fig, ax = plt.subplots()
     for channel in channels:
         ax.plot(
             psds[channel].sample_frequencies,
             psds[channel],
+            c=channel_colours[channel],
             label=channel
         )
 
@@ -126,8 +129,11 @@ def main():
 
 
     if args.smooth_regions is not None:
+        logger.info("Smoothing PSDs")
 
-        frequencies = psds[channels[0]].sample_frequencies
+        psds = smooth_psd(psds, channels, args.smooth_regions)
+
+        logger.debug("Indicating smoothed regions")
         for region_start, region_end in args.smooth_regions:
             ax.axvspan(
                 region_start,
@@ -136,55 +142,26 @@ def main():
                 alpha=0.2,
             )
 
-            xdiff = np.log10(region_end) - np.log10(region_start)
-                        
-            # Find the index of the left hand side of the smoothed region:
-            left_idx = np.argmin(np.abs(frequencies - region_start))
-            # Find the index of the right hand side of the smoothed region:
-            right_idx = np.argmin(np.abs(frequencies - region_end))
+        ax.axvspan(np.nan, np.nan, color='gray', alpha=0.2, label="Smoothed region(s)")
 
-            for channel in channels:
-                # Find the value of the left hand side - to do this we take the
-                # median of 5 samples up to the left_idx
-                left_value = np.median(abs(psds[channel].data[left_idx-5:left_idx]))
-                # Find the value of the rigth hand side - again 5 sample median,
-                # but this time above the index
-                right_value = np.median(abs(psds[channel].data[right_idx:right_idx+5]))
-
-
-                ax.plot(
-                    [frequencies[left_idx], frequencies[right_idx]],
-                    [left_value, right_value],
-                    color='k',
+        logger.debug("Plotting smoothed PSDs")
+        for channel in channels:
+            for region_start, region_end in args.smooth_regions:
+                this_region = np.logical_and(
+                    psds[channel].sample_frequencies >= region_start,
+                    psds[channel].sample_frequencies <= region_end
                 )
-
-                # Get the y=mx+c values in log-log space (xdiff is consistent for all channels)
-                ydiff = np.log10(right_value) - np.log10(left_value)
-                slope = ydiff / xdiff
-                intercept = np.log10(left_value) - slope * np.log10(region_start)
-
-                line_section = np.pow(10, slope * np.log10(frequencies) + intercept)
                 ax.plot(
-                    frequencies[left_idx:right_idx],
-                    line_section[left_idx:right_idx],
-                    color='red',
+                    psds[channel].sample_frequencies[this_region],
+                    psds[channel][this_region],
+                    c=smoothed_colours[channel],
                     linestyle=':',
+                    alpha=0.5
                 )
-                
-                # Now lets smoothly transition between the PSD values and the
-                # straight line using a Hann window
-                window = hann(right_idx - left_idx)
-                smoothed_psd = line_section[left_idx:right_idx] * window + psds[channel].data[left_idx:right_idx] * (1 - window)
-                ax.plot(
-                    frequencies[left_idx:right_idx],
-                    smoothed_psd,
-                    label=f'Smoothed {channel}'
-                )
-                psds[channel].data[left_idx:right_idx] = smoothed_psd
+            ax.plot(np.nan, np.nan, smoothed_colours[channel], label=f"Smoothed {channel}", linestyle=':', alpha=0.5)
 
-    ax.axvspan(np.nan, np.nan, color='gray', alpha=0.2, label="Smoothed region(s)")
     ax.legend(loc='upper left')
-    fig.savefig(f'{args.testing_plots}/psd.png')
+    fig.savefig(f'{args.testing_plots}/sangria_psd.png')
 
     logger.info("Saving PSDs")
     for channel in channels:

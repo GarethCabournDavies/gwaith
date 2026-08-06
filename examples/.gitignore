@@ -1,2 +1,2 @@
-LDC2_sangria_hm_training.hdf
-*PSD.txt
+datasets/LDC2_sangria_hm_training.hdf
+datasets/*PSD.txt

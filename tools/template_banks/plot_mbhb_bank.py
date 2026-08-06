@@ -2,26 +2,26 @@
 
 from matplotlib import pyplot as plt
 from matplotlib import use
+
 use('Agg')
-plt.rcParams.update({
-    "text.usetex": True,
-    "font.family": "Helvetica"
-})
+import argparse
 import logging
 
 import h5py
-import argparse
 import ldc.io.hdf5 as hdfio
 import numpy as np
 
-from pycbc.conversions import mchirp_from_mass1_mass2, eta_from_mass1_mass2, chi_eff
-from pycbc import init_logging, add_common_pycbc_options
+from hwilas import add_hwilas_common_options, init_logging
+from hwilas.conversions import (
+    chi_eff_from_component_spins,
+    mchirp_eta_from_mass1_mass2,
+)
 
 logger = logging.getLogger(__name__)
 
 def main():
     parser = argparse.ArgumentParser()
-    add_common_pycbc_options(parser)
+    add_hwilas_common_options(parser)
     parser.add_argument(
         "--bank-file",
         required=True,
@@ -48,9 +48,8 @@ def main():
         s2z = f['spin2z'][:]
 
     logger.info('Converting parameters')
-    mchirp = mchirp_from_mass1_mass2(m1, m2)
-    eta = eta_from_mass1_mass2(m1, m2)
-    chieff = chi_eff(m1, m2, s1z, s2z)
+    mchirp, eta = mchirp_eta_from_mass1_mass2(m1, m2)
+    chieff = chi_eff_from_component_spins(m1, m2, s1z, s2z)
 
     spin_range = (-1, 1)
     mchirp_range = (np.min(mchirp), np.max(mchirp))
@@ -111,15 +110,11 @@ def main():
             args.signal_definition_file,
             name="sky/mbhb/cat"
         )
-        mbhb_mchirp = mchirp_from_mass1_mass2(
+        mbhb_mchirp, mbhb_eta = mchirp_eta_from_mass1_mass2(
             mbhbs['Mass1'],
             mbhbs['Mass2']
         )
-        mbhb_eta = eta_from_mass1_mass2(
-            mbhbs['Mass1'],
-            mbhbs['Mass2']
-        )
-        mbhb_chieff = chi_eff(
+        mbhb_chieff = chi_eff_from_component_spins(
             mbhbs['Mass1'],
             mbhbs['Mass2'],
             mbhbs['Spin1'],
@@ -165,12 +160,12 @@ def main():
     # Labels along the bottom x axis
     axes[2,0].set_xlabel('Chirp Mass $\\mathcal{M}$, $M_\\odot$')
     axes[2,1].set_xlabel('Symmetric Mass ratio $\\eta$')
-    axes[2,2].set_xlabel('Dimensionless Spin $\\chi_\\textrm{eff}$')
+    axes[2,2].set_xlabel('Dimensionless Spin $\\chi_\\text{eff}$')
 
     # Labels along the left y axis
     axes[0,0].set_ylabel('Chirp Mass $\\mathcal{M}$, $M_\\odot$')
     axes[1,0].set_ylabel('Symmetric Mass ratio $\\eta$')
-    axes[2,0].set_ylabel('Dimensionless Spin $\\chi_\\textrm{eff}$')
+    axes[2,0].set_ylabel('Dimensionless Spin $\\chi_\\text{eff}$')
 
     # set axis limits where appropriate
     for row in (0, 1, 2):
