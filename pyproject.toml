@@ -10,14 +10,18 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
 	"numpy",
-	"bbhx",
+	"bbhx @ git+https://github.com/titodalcanton/BBHx.git@py39-and-cleanup",
 	"scipy",
 	"matplotlib",
 	"gwaith @ git+https://github.com/uk-lisa-gs/gwaith.git",
 ]
 
 [project.optional-dependencies]
-test = ["pytest", "pycbc"]
+test = [
+	"pytest",
+	"pycbc",
+	"pycbc-bbhx-plugin @ git+https://github.com/gwastro/BBHX-waveform-model.git"
+]
 
 [project.scripts]
 hwilas_coincidence = "tools.search.coincidence:main"
