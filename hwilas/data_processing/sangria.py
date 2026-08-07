@@ -6,7 +6,11 @@ import ldc.io.hdf5 as hdfio
 import numpy as np
 from tqdm import tqdm
 
-from gwaith.types import TimeSeries
+from hwilas.data_processing.tdi import (
+    AET,
+    linear_AET_conversion,
+    to_timeseries,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -21,27 +25,6 @@ _CHANNEL_MAP = {
 
 CHUNK_SIZE = 2 ** 22
 
-
-def linear_AET_conversion(data):
-    X = data['X']
-    Y = data['Y']
-    Z = data['Z']
-
-    return {
-        'LISA_A': (Z - X)/np.sqrt(2),
-        'LISA_E': (X - 2*Y + Z)/np.sqrt(6),
-        'LISA_T': (X + Y + Z)/np.sqrt(3)
-    }
-
-def to_timeseries(data, channels, delta_t, epoch):
-    return {
-        channel: TimeSeries(
-            data[channel],
-            delta_t=delta_t,
-            epoch=epoch
-        )
-        for channel in channels
-    }
 
 
 def load_downsample_sangria(
@@ -61,7 +44,9 @@ def load_downsample_sangria(
     delta_t = sangria_descr['dt']
     epoch = sangria_descr['t0']
 
-    data = linear_AET_conversion(sangria_data)
+    data = linear_AET_conversion(
+        sangria_data['X'], sangria_data['Y'], sangria_data['Z']
+    )
 
     if downsample_delta_t is None or delta_t == downsample_delta_t:
         return to_timeseries(data, channels, delta_t, epoch)
@@ -121,6 +106,4 @@ def load_sangria_timeseries(
     delta_t = attrs['dt']
     epoch = attrs['t0']
     
-    data = linear_AET_conversion({'X': X, 'Y': Y, 'Z': Z})
-
-    return to_timeseries(data, data.keys(), delta_t, epoch)
+    return AET(X, Y, Z, delta_t, epoch)

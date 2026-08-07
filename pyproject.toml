@@ -17,10 +17,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-test = [
-	"pytest",
-	"pycbc",
-]
+test = ["pytest", "pycbc"]
 
 [project.scripts]
 hwilas_coincidence = "tools.search.coincidence:main"

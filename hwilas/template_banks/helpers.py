@@ -1,3 +1,4 @@
+"""Helper functions for creating and using template banks."""
 import copy
 import numpy
 

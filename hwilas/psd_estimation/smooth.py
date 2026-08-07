@@ -34,7 +34,10 @@ def smooth_psd(psds_in, channels, smoothing_regions):
             slope = ydiff / xdiff
             intercept = np.log10(left_value) - slope * np.log10(region_start)
 
-            line_section = np.pow(10, slope * np.log10(frequencies) + intercept)
+            log_freqs = np.zeros_like(frequencies)
+            nonzero = frequencies > 0
+            log_freqs[nonzero] = np.log10(frequencies[nonzero])
+            line_section = np.power(10, slope * log_freqs + intercept)
             
             # Now lets smoothly transition between the PSD values and the
             # straight line using a Hann window

@@ -6,6 +6,10 @@ import numpy as np
 
 from .bbhx_conversion import _core_transforms, convert_frame_parameters
 
+# Default time offset for LISA's position, corresponding to ~20 degrees
+# behind Earth
+TIME_OFFSET_20_DEGREES = 7365189.431698
+
 ARGS_KEYS = [
     "m1",
     "m2",

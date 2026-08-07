@@ -1,9 +1,11 @@
 import numpy as np
+from scipy.constants import c, pi
+
 from bbhx.utils.constants import YRSID_SI
 from bbhx.waveformbuild import BBHWaveformFD
-from pycbc.coordinates import TIME_OFFSET_20_DEGREES, lisa_to_ssb
-from pycbc.psd.analytical_space import omega_length
-from pycbc.types import FrequencySeries
+from gwaith.types import FrequencySeries
+
+from hwilas.waveforms.bbhx_utils import get_bbhx_parameter_dict, TIME_OFFSET_20_DEGREES
 
 DEFAULT_HM_MODE_ARRAY = [(2, 2), (2, 1), (3, 3), (3, 2), (4, 4), (4, 3)]
 
@@ -15,8 +17,8 @@ def get_fd_waveform_from_bbhx(
     Generate a frequency domain waveform using BBHx, including TDI projection.
 
     This function is a wrapper around the BBHx waveform generator, intended
-    to be a replacement for the custom pycbc `get_fd_det_waveform` call.
-    It mimics the logic found in the `gwastro/BBHX-waveform-model` plugin.
+    to provide a unified interface for waveform generation, using the utility
+    modules for parameter conversion.
 
     Parameters
     ----------
@@ -28,61 +30,64 @@ def get_fd_waveform_from_bbhx(
     Returns
     -------
     dict
-        A dictionary containing the projected waveforms for each detector as
-        pycbc.types.FrequencySeries objects.
+        A dictionary containing the projected waveforms for each IFO as
+        gwaith.types.FrequencySeries objects.
     """
     ifos = params.get('ifos', ['LISA_A', 'LISA_E'])
-    
-    # 1. Get parameters and convert to types expected by BBHx
-    m1 = np.float64(params['mass1'])
-    m2 = np.float64(params['mass2'])
-    a1 = np.float64(params.get('spin1z', 0.0))
-    a2 = np.float64(params.get('spin2z', 0.0))
-    inc = np.float64(params.get('inclination', 0.0))
-    dist = np.float64(params['distance']) # Already in Mpc
-    f_ref = np.float64(params.get('f_ref', params['f_lower']))
-    phi_ref = np.float64(params.get('coa_phase', 0.0))
-    
-    t_offset = TIME_OFFSET_20_DEGREES # Default from BBHX_Phenom
+
+    # The pycbc-bbhx plugin applies a time offset before frame conversion
+    # to account for LISA's position. We replicate that logic here.
+    t_offset = params.get("t_offset", TIME_OFFSET_20_DEGREES)
+    t_ref_lisa_for_conversion = params["tc"] + t_offset
+
+    # 1. Assemble parameters for conversion to BBHx frame
+    # The input parameters are assumed to be in the LISA frame.
+    bbhx_input_params = {
+        "m1": params["mass1"],
+        "m2": params["mass2"],
+        "chi1z": params.get("spin1z", 0.0),
+        "chi2z": params.get("spin2z", 0.0),
+        "distance": params["distance"],
+        "inc": params.get("inclination", 0.0),
+        "phi_ref": params.get("coa_phase", 0.0),
+        "f_ref": params.get("f_ref", params["f_lower"]),
+        "lam": params["eclipticlongitude"],
+        "beta": params["eclipticlatitude"],
+        "psi": params["polarization"],
+        "t_ref": t_ref_lisa_for_conversion,
+    }
+
+    # 2. Convert to SSB frame for BBHx
+    bbhx_params = get_bbhx_parameter_dict(
+        bbhx_input_params,
+        parameter_frame="LISA",
+        t0=params['t_obs_start'] / YRSID_SI
+    )
+
     t_obs_start = np.float64(params['t_obs_start'])
     mode_array = params.get("mode_array", DEFAULT_HM_MODE_ARRAY)
-    
+
     df = np.float64(params['delta_f'])
     length = int(params['length'])
     if length <= 0:
         raise ValueError(f"Waveform length must be positive, got {length}")
+
     # Build an exact FFT grid from requested bin count to avoid off-by-one
     # effects from floating-point arange stop values.
     freqs = df * np.arange(length, dtype=np.float64)
-    
-    # 2. Coordinate transformation from LISA frame to SSB
-    # This is a critical step from the plugin logic
-    t_ref_lisa = np.float64(params['tc']) + t_offset
-    lam = np.float64(params['eclipticlongitude'])
-    beta = np.float64(params['eclipticlatitude'])
-    psi = np.float64(params['polarization'])
-    
-    t_ref, lam, beta, psi = lisa_to_ssb(
-        t_lisa=t_ref_lisa,
-        longitude_lisa=lam,
-        latitude_lisa=beta,
-        polarization_lisa=psi,
-        t0=0
-    )
-    
-    # 3. Instantiate the BBHx waveform generator
-    # For now, we use a simplified setup. The plugin has more complex caching.
+
+    # 3. Instantiate and call the BBHx waveform generator
     wave_gen = BBHWaveformFD(
         amp_phase_kwargs={
             "run_phenomd": (params['approximant'] == 'BBHX_PhenomD')
         },
     )
-    
-    # 4. Call the generator
+
     wave = wave_gen(
-        m1, m2, a1, a2,
-        dist, phi_ref, f_ref, inc, lam,
-        beta, psi, t_ref,
+        bbhx_params["m1"], bbhx_params["m2"], bbhx_params["chi1z"], bbhx_params["chi2z"],
+        bbhx_params["distance"], bbhx_params["phi_ref"], bbhx_params["f_ref"],
+        bbhx_params["inc"], bbhx_params["lam"], bbhx_params["beta"],
+        bbhx_params["psi"], bbhx_params["t_ref"],
         freqs=freqs,
         modes=mode_array,
         t_obs_start=t_obs_start / YRSID_SI,
@@ -93,32 +98,33 @@ def get_fd_waveform_from_bbhx(
         length=length,
     )[0]
 
-    # 5. Select the desired TDI channels
+    # 4. Select the desired TDI channels and wrap in FrequencySeries
     wanted = {name: i for i, name in enumerate(['LISA_A', 'LISA_E', 'LISA_T']) if name in ifos}
     output = {}
-    
-    # 6. Wrap in FrequencySeries and apply shifts/rescaling
+
+    # The coalescence time in the LISA frame is the original 'tc'
+    t_ref_lisa = np.float64(params['tc'])
     length_of_wave = 1 / df
     loc_of_signal_merger_within_wave = t_ref_lisa % length_of_wave
-    
+
     for channel, tdi_num in wanted.items():
         output[channel] = FrequencySeries(
             wave[tdi_num],
             delta_f=df,
             epoch=t_ref_lisa - loc_of_signal_merger_within_wave,
-            copy=False
         )
         # move the merge to the end of the vector
         output[channel] = output[channel].cyclic_time_shift(
             length_of_wave - loc_of_signal_merger_within_wave)
-        output[channel].start_time -= t_offset
-        
-    # 7. Apply TDI 2.0 rescaling if requested
+
+
+    # 5. Apply TDI 2.0 rescaling if requested
     if str(tdi) == '2.0':
         from bbhx.utils.constants import L_SI
-        omega_len = omega_length(f=output['LISA_A'].sample_frequencies, len_arm=L_SI)
+        f = np.asarray(output['LISA_A'].sample_frequencies.data)
+        omega_len = 2 * pi * f * L_SI / c
         rescale = 2j * np.sin(2 * omega_len) * np.exp(-2j * omega_len)
         for key in output:
             output[key] *= rescale
-            
+
     return output

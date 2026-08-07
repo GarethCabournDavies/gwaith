@@ -14,7 +14,7 @@ from ldc.waveform.lisabeta import FastBHB
 from gwaith.io import MultiDetOptionAction
 
 from hwilas import add_hwilas_common_options, init_logging
-from hwilas.data_processing.utils import AET, to_timeseries
+from hwilas.data_processing.tdi import AET, to_timeseries
 from hwilas.filter import matched_filter_frequencyseries
 from hwilas.psd.read import from_txt as psd_from_txt
 from hwilas.waveforms import get_fd_waveform

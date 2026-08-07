@@ -13,7 +13,7 @@ from matplotlib import pyplot as plt
 from gwaith.types import TimeSeries
 
 from hwilas import add_hwilas_common_options, init_logging
-from hwilas.conversions import mchirp_eta_from_mass1_mass2, mass1_mass2_from_mchirp_eta
+from hwilas.parameters import mchirp_eta_from_mass1_mass2, mass1_mass2_from_mchirp_eta
 from hwilas.filter import matched_filter_frequencyseries, sigmasq_frequencyseries
 from hwilas.psd.read import from_txt as psd_from_txt
 from hwilas.types import KeyValueAction

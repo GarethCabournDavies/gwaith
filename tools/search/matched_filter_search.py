@@ -15,7 +15,7 @@ from gwaith.types import TimeSeries, FrequencySeries
 from hwilas import add_hwilas_common_options, init_logging
 from hwilas.filter import matched_filter_frequencyseries
 from hwilas.psd.read import from_txt as psd_from_txt
-from hwilas.template_banks.utils import waveform_from_bank
+from hwilas.template_banks.helpers import waveform_from_bank
 from hwilas.waveforms import get_fd_waveform
 
 logger = logging.getLogger(__name__)

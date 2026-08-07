@@ -1,5 +1,5 @@
 """Hwilas package."""
-from .utils import (
+from .common import (
     __version__,
     add_hwilas_common_options,
     import_optional,

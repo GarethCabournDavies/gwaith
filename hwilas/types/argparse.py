@@ -23,6 +23,9 @@ class KeyValueAction(argparse.Action):
         if getattr(namespace, self.dest, None) is None:
             setattr(namespace, self.dest, {})
 
+        if isinstance(values, str):
+            values = [values]
+
         converter = self.value_type if self.value_type is not None else str
         for value in values:
             if ':' not in value:
