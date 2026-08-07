@@ -1,0 +1,8 @@
+channels:
+ - conda-forge
+dependencies:
+ - liblapacke
+ - openblas
+ - clang_osx-arm64
+ - clangxx_osx-arm64
+ - gfortran_osx-arm64

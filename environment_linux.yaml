@@ -1,0 +1,7 @@
+channels:
+ - conda-forge
+dependencies:
+ - lapack=3.6.1
+ - gcc_linux-64
+ - gxx_linux-64
+ - gfortran_linux-64
