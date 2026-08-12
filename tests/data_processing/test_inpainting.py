@@ -12,7 +12,7 @@ from hwilas.data_processing.inpainting import gate_and_paint
 
 @pytest.fixture
 def synthetic_data():
-    """Create synthetic data for testing."""
+    """Create synthetic data for testing with a non-flat PSD."""
     sample_rate = 1024
     duration = 4
     num_samples = duration * sample_rate
@@ -20,10 +20,13 @@ def synthetic_data():
     noise = np.random.normal(0, 1, num_samples)
     input_ts = TimeSeries(noise, delta_t=1.0 / sample_rate, epoch=1234567890)
 
-    psd_value = 1.0
+    # Create a non-flat, more realistic PSD (e.g. a power law)
     delta_f = 1.0 / duration
     freqs = np.fft.rfftfreq(num_samples, d=1.0 / sample_rate)
-    psd_data = np.full(len(freqs), psd_value)
+    # A simple power-law PSD: S(f) = 1/f + constant
+    psd_data = (1.0 / (freqs + 1e-3)) + 0.5
+    psd_data[0] = psd_data[1]  # Avoid singularity and large DC component
+
     psd = FrequencySeries(psd_data, delta_f=delta_f)
 
     return input_ts, psd
@@ -37,23 +40,21 @@ def test_inpainting_overwhitened_is_zero(synthetic_data):
     input_ts, psd = synthetic_data
     num_samples = len(input_ts)
     sample_rate = int(1 / input_ts.delta_t)
-    freqs = np.fft.rfftfreq(num_samples, d=1.0 / sample_rate)
 
     gap_start = int(1.0 * sample_rate)
     gap_end = int(1.5 * sample_rate)
 
     inpainted_ts = gate_and_paint(input_ts, [gap_start], [gap_end], psd)
 
-    # Over-whiten the inpainted data
+    # Overwhiten the inpainted data.
     fft_inpainted = np.fft.rfft(inpainted_ts.data)
-    psd_interp = np.interp(freqs, psd.sample_frequencies.data, psd.data)
-    whitened_fft = fft_inpainted / np.sqrt(psd_interp)
+    overwhitened_fft = fft_inpainted / (psd.data ** 2)
 
-    whitened_ts_data = np.fft.irfft(whitened_fft, n=num_samples)
+    overwhitened_ts_data = np.fft.irfft(overwhitened_fft, n=num_samples)
 
-    # Check that the whitened data in the gap is close to zero
-    whitened_gap_data = whitened_ts_data[gap_start:gap_end]
-    assert np.all(np.isclose(whitened_gap_data, 0, atol=1e-9))
+    # Check that the over-whitened data in the gap is close to zero
+    overwhitened_gap_data = overwhitened_ts_data[gap_start:gap_end]
+    assert np.all(np.isclose(overwhitened_gap_data, 0, atol=1e-9))
 
 
 def test_no_gaps(synthetic_data):
@@ -69,6 +70,7 @@ def test_no_gaps(synthetic_data):
 def test_multiple_gaps(synthetic_data):
     """Test inpainting with multiple, non-overlapping gaps."""
     input_ts, psd = synthetic_data
+    num_samples = len(input_ts)
     sample_rate = int(1 / input_ts.delta_t)
 
     gaps = [
@@ -86,10 +88,21 @@ def test_multiple_gaps(synthetic_data):
         mask[start:end] = False
 
     assert np.allclose(
-        input_ts.data[mask], inpainted_ts.data[mask], atol=1e-9
+        input_ts.data[mask],
+        inpainted_ts.data[mask],
+        atol=1e-9
     )
-    # The main correctness check is done in test_inpainting_overwhitened_is_zero
-    # Here we just want to ensure it runs with multiple gaps.
+
+    # Overwhiten the inpainted data.
+    fft_inpainted = np.fft.rfft(inpainted_ts.data)
+    overwhitened_fft = fft_inpainted / (psd.data ** 2)
+    overwhitened_ts_data = np.fft.irfft(overwhitened_fft, n=num_samples)
+
+    # Check that the over-whitened data in each gap is close to zero
+    for start, end in gaps:
+        overwhitened_gap_data = overwhitened_ts_data[start:end]
+        assert np.all(np.isclose(overwhitened_gap_data, 0, atol=1e-9))
+
 
 
 def test_input_output_types_and_properties(synthetic_data):

@@ -14,6 +14,7 @@ dependencies = [
 	"scipy",
 	"matplotlib",
 	"gwaith @ git+https://github.com/uk-lisa-gs/gwaith.git",
+	"mojito"
 ]
 
 [project.optional-dependencies]

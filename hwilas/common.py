@@ -8,9 +8,6 @@ from importlib.metadata import PackageNotFoundError, version
 
 __version__ = "0.1.0"
 
-_LOG_FORMAT = "%(levelname)s:%(asctime)s:%(name)s:%(message)s"
-_LOG_DATEFMT = "%Y-%m-%dT%H:%M:%S%z"
-
 def _resolve_version() -> str:
     try:
         return version("hwilas")
@@ -41,17 +38,30 @@ def add_hwilas_common_options(
     return parser
 
 
-_LOG_FORMAT = "%(levelname)s: %(asctime)s: %(name)s: %(message)s"
+_LOG_FORMAT = "%(levelname)s:%(asctime)s:%(name)s:%(message)s"
 _LOG_DATEFMT = "%Y-%m-%dT%H:%M:%S%z"
 
-def init_logging(verbosity: int = 0) -> int:
-    """Initialize unified logging format and return selected level."""
-    if verbosity <= 0:
-        level = logging.WARNING
-    elif verbosity == 1:
-        level = logging.INFO
-    else:
-        level = logging.DEBUG
+def init_logging(
+    verbosity: int = 0,
+    default_level: int = logging.WARNING,
+    reduce_logging_level: list[str] = None
+) -> int:
+    """Initialize unified logging format and return selected level.
+    You can also pass a list to reduce_logging_level if there are certain loggers which spam too much.
+    (looking at you matplotlib.font_manager 👀)
+    """
+
+    # the logging.WHATEVER levels are just wrappers for ints separated by 10
+    # We reduce the level according to the number in verbosity.
+    # verbosity is usually set by args.verbose in the common_options above,
+    # which is an integer count of --verboses
+    level = default_level - verbosity * 10
+    reduced_level = default_level - (verbosity - 1) * 10
+
+    if reduce_logging_level is not None:
+        # This is a list of named loggers that we need to make a bit quieter
+        for logger_name in reduce_logging_level:
+            logging.getLogger(logger_name).setLevel(reduced_level)
 
     logging.basicConfig(level=level, format=_LOG_FORMAT, datefmt=_LOG_DATEFMT)
     return level
@@ -79,3 +89,11 @@ def import_optional(module_name):
         return importlib.import_module(module_name)
     except ImportError:
         return _MissingModule(module_name)
+
+    
+__all__ = [
+    "__version__",
+    "add_hwilas_common_options",
+    "import_optional",
+    "init_logging",
+]

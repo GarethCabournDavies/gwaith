@@ -3,7 +3,7 @@ set -e
 template_parallelization=15
 
 total_data_duration=$((365 * 86400)) # 1 year in seconds
-chunk_duration=$((60 * 86400))       # 2 months in seconds
+chunk_duration=$((120 * 86400))       # ~4 months in seconds
 overlap_duration=$((30 * 86400))     # 30 days in seconds
 padding_for_process_data=$((30 * 86400)) # Padding for hwilas_process_sangria_data, e.g., 30 days
 
