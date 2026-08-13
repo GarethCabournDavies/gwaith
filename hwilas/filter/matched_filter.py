@@ -140,7 +140,7 @@ def matched_filter_frequencyseries(
     stilde: NDArray[np.complex128] = np.asarray(data_fs.data, dtype=np.complex128)
     psd_data: NDArray[np.float64] | None = np.asarray(psd.data, dtype=np.float64) if psd is not None else None
 
-    qtilde: NDArray[np.complex128] = np.zeros(n_samples, dtype=np.complex128)
+    qtilde: NDArray[np.complex128] = np.zeros(flen_expected, dtype=np.complex128)
     qtilde_slice: NDArray[np.complex128] = np.conjugate(htilde[kmin:kmax]) * stilde[kmin:kmax]
     if psd_data is not None:
         valid: NDArray[np.bool_] = np.isfinite(psd_data[kmin:kmax]) & (psd_data[kmin:kmax] > 0)
@@ -149,7 +149,12 @@ def matched_filter_frequencyseries(
         qtilde_slice = whitened
     qtilde[kmin:kmax] = qtilde_slice
 
-    corr: NDArray[np.complex128] = np.fft.ifft(qtilde) * n_samples
+    # With a real signal, the SNR time series should also be real.
+    # We use irfft which is designed for this purpose, producing a
+    # real time series of length n_samples.
+    # The result of irfft is unscaled, so we apply a factor of n_samples
+    # to be consistent with the unscaled ifft.
+    corr: NDArray[np.float64] = np.fft.irfft(qtilde, n=n_samples) * n_samples
 
     sigmasq = sigmasq_frequencyseries(
         template_fs,
@@ -159,7 +164,7 @@ def matched_filter_frequencyseries(
     )
 
     if not np.isfinite(sigmasq) or sigmasq <= 0:
-        snr_data: NDArray[np.complex128] = np.zeros(n_samples, dtype=np.complex128)
+        snr_data: NDArray[np.float64] = np.zeros(n_samples, dtype=np.float64)
     else:
         norm = (4.0 * delta_f) / np.sqrt(sigmasq)
         snr_data = corr * norm

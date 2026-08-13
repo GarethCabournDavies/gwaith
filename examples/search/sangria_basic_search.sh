@@ -1,16 +1,58 @@
+#!/bin/bash
 set -e
+
+RUN_MODE="slurm" # Options: "slurm" or "bash"
+
+# Ensure the matched filter template script is executable
+chmod +x "$(dirname "$0")/matched_filter_template.sh"
 
 template_parallelization=15
 
 total_data_duration=$((365 * 86400)) # 1 year in seconds
-chunk_duration=$((120 * 86400))       # ~4 months in seconds
-overlap_duration=$((30 * 86400))     # 30 days in seconds
+chunk_duration=$((122 * 86400))      # just over 4 months in seconds
 padding_for_process_data=$((30 * 86400)) # Padding for hwilas_process_sangria_data, e.g., 30 days
 
 current_analysis_start_time=0
 chunk_idx=0
 
 matched_filter_job_ids=()
+
+# This function creates a self-contained, executable script that can either be
+# submitted to Slurm as a job array or run directly with bash to execute all
+# tasks in parallel.
+handle_matched_filter_jobs() {
+    local chunk_output_dir=$1
+    local channel=$2
+    local chunk_idx=$3
+    local template_parallelization=$4
+
+    echo "Handling Matched Filter jobs for Channel ${channel} (Chunk ${chunk_idx})"
+    local sbatch_script="${chunk_output_dir}/logs/mf_${channel}_chunk${chunk_idx}.sbatch"
+    local sbatch_template_path
+    sbatch_template_path="$(dirname "$0")/sbatch_mf_template.sh"
+    # Use an absolute path for the template script to make the sbatch script portable
+    local template_script_path
+    template_script_path=$(readlink -f "$(dirname "$0")/matched_filter_template.sh")
+    local template_parallelization_minus_1=$((template_parallelization - 1))
+
+    # Create the executable sbatch script from the template
+    sed -e "s|@@CHUNK_OUTPUT_DIR@@|${chunk_output_dir}|g" \
+        -e "s|@@CHANNEL@@|${channel}|g" \
+        -e "s|@@CHUNK_IDX@@|${chunk_idx}|g" \
+        -e "s|@@TEMPLATE_PARALLELIZATION_MINUS_1@@|${template_parallelization_minus_1}|g" \
+        -e "s|@@TEMPLATE_PARALLELIZATION@@|${template_parallelization}|g" \
+        -e "s|@@TEMPLATE_SCRIPT_PATH@@|${template_script_path}|g" \
+        "${sbatch_template_path}" > "${sbatch_script}"
+
+    chmod +x "${sbatch_script}"
+
+    if [ "$RUN_MODE" == "slurm" ]; then
+        job_id=$(sbatch --parsable "${sbatch_script}")
+        matched_filter_job_ids+=("$job_id")
+    else # RUN_MODE == "bash"
+        "${sbatch_script}"
+    fi
+}
 
 while (( $(echo "$current_analysis_start_time < $total_data_duration" | bc -l) )); do
   analysis_end_time=$(echo "$current_analysis_start_time + $chunk_duration" | bc -l)
@@ -26,81 +68,50 @@ while (( $(echo "$current_analysis_start_time < $total_data_duration" | bc -l) )
   mkdir -p "${chunk_output_dir}/matched_filter"
   mkdir -p "${chunk_output_dir}/logs"
 
-  # 1. Process Sangria Data for this chunk
-  echo "Running hwilas_process_sangria_data for chunk ${chunk_idx}"
-  hwilas_process_sangria_data \
-    --data-file ../datasets/LDC2_sangria_hm_training.hdf \
-    --psd-file ../psd_estimation/output/A_sangria_hm_SMOOTHED_PSD.txt \
-    --output-file "${chunk_output_dir}/data_processing/LDC2_sangria_hm_training_padded.hdf" \
-    --padding-duration "${padding_for_process_data}" \
-    --analysis-start-time "${current_analysis_start_time}" \
-    --analysis-end-time "${analysis_end_time}" \
-    --verbose --verbose \
-    --testing-plots "${chunk_output_dir}/data_processing"
+#   # 1. Process Sangria Data for this chunk
+#   echo "Running hwilas_process_sangria_data for chunk ${chunk_idx}"
+#   hwilas_process_sangria_data \
+#     --data-file ../datasets/LDC2_sangria_hm_training.hdf \
+#     --psd-file ../psd_estimation/output/A_sangria_hm_SMOOTHED_PSD.txt \
+#     --output-file "${chunk_output_dir}/data_processing/LDC2_sangria_hm_training_padded.hdf" \
+#     --padding-duration "${padding_for_process_data}" \
+#     --analysis-start-time "${current_analysis_start_time}" \
+#     --analysis-end-time "${analysis_end_time}" \
+#     --verbose --verbose \
+#     --testing-plots "${chunk_output_dir}/data_processing"
 
-  # 2. Submit Matched Filter Job Array for Channel A
-  echo "Submitting Matched Filter Job Array for Channel A (Chunk ${chunk_idx})"
-  job_id_A=$(sbatch --parsable \
-    --job-name="mf_A_chunk${chunk_idx}" \
-    --output="${chunk_output_dir}/logs/mf_A_%a_%j.out" \
-    --error="${chunk_output_dir}/logs/mf_A_%a_%j.err" \
-    --array=0-$((${template_parallelization} - 1)) \
-    --wrap "hwilas_matched_filter_search \
-      --verbose \
-      --bank-file ../template_banks/output/sangria_bank.hdf \
-      --psd-file ../psd_estimation/output/A_sangria_hm_SMOOTHED_PSD.txt \
-      --input-data-file "${chunk_output_dir}/data_processing/LDC2_sangria_hm_training_padded.hdf" \
-      --channel LISA_A \
-      --output-file "${chunk_output_dir}/matched_filter/matched_filter_snr_peaks_A_\${SLURM_ARRAY_TASK_ID}.hdf" \
-      --template-fraction-range \${SLURM_ARRAY_TASK_ID}/${template_parallelization} \
-      --testing-plots "${chunk_output_dir}/matched_filter" ")
-  matched_filter_job_ids+=("$job_id_A")
-
-  # 3. Submit Matched Filter Job Array for Channel E
-  echo "Submitting Matched Filter Job Array for Channel E (Chunk ${chunk_idx})"
-  job_id_E=$(sbatch --parsable \
-    --job-name="mf_E_chunk${chunk_idx}" \
-    --output="${chunk_output_dir}/logs/mf_E_%a_%j.out" \
-    --error="${chunk_output_dir}/logs/mf_E_%a_%j.err" \
-    --array=0-$((${template_parallelization} - 1)) \
-    --wrap "hwilas_matched_filter_search \
-      --verbose \
-      --bank-file ../template_banks/output/sangria_bank.hdf \
-      --psd-file ../psd_estimation/output/E_sangria_hm_SMOOTHED_PSD.txt \
-      --input-data-file "${chunk_output_dir}/data_processing/LDC2_sangria_hm_training_padded.hdf" \
-      --channel LISA_E \
-      --output-file "${chunk_output_dir}/matched_filter/matched_filter_snr_peaks_E_\${SLURM_ARRAY_TASK_ID}.hdf" \
-      --template-fraction-range \${SLURM_ARRAY_TASK_ID}/${template_parallelization} \
-      --testing-plots "${chunk_output_dir}/matched_filter" ")
-  matched_filter_job_ids+=("$job_id_E")
+  handle_matched_filter_jobs "${chunk_output_dir}" "LISA_A" "${chunk_idx}" "${template_parallelization}"
+  handle_matched_filter_jobs "${chunk_output_dir}" "LISA_E" "${chunk_idx}" "${template_parallelization}"
 
   # Update for next chunk
-  current_analysis_start_time=$(echo "$current_analysis_start_time + $chunk_duration - $overlap_duration" | bc -l)
+  current_analysis_start_time=$(echo "$current_analysis_start_time + $chunk_duration" | bc -l)
   chunk_idx=$((chunk_idx + 1))
 done
 
-if [ ${#matched_filter_job_ids[@]} -eq 0 ]; then
-  echo "No matched-filter jobs were submitted."
-  exit 1
-fi
-
-joined_job_ids=$(IFS=,; echo "${matched_filter_job_ids[*]}") # Join all job IDs with commas
-echo "Monitoring $((${#matched_filter_job_ids[@]} * ${template_parallelization})) tasks across job arrays: ${joined_job_ids}"
-echo "Waiting for matched-filter Slurm jobs to finish: ${joined_job_ids}"
-while true; do
-  active_jobs=0
-  for job_id in "${matched_filter_job_ids[@]}"; do
-    # squeue -h -j "$job_id" will list all tasks for that specific job array
-    active_jobs=$((active_jobs + $(squeue -h -r -j "$job_id" | wc -l)))
-  done
-  if [ "${active_jobs}" -eq 0 ]; then
-    break
+if [ "$RUN_MODE" == "slurm" ]; then
+  if [ ${#matched_filter_job_ids[@]} -eq 0 ]; then
+    echo "No matched-filter jobs were submitted."
+    exit 1
   fi
-  echo "${active_jobs} total matched-filter jobs (from all chunks and channels) still running/pending..."
-  sleep 30
-done
 
-echo "All matched-filter Slurm jobs have finished."
+  joined_job_ids=$(IFS=,; echo "${matched_filter_job_ids[*]}") # Join all job IDs with commas
+  echo "Monitoring $((${#matched_filter_job_ids[@]} * ${template_parallelization})) tasks across job arrays: ${joined_job_ids}"
+  echo "Waiting for matched-filter Slurm jobs to finish: ${joined_job_ids}"
+  while true; do
+    active_jobs=0
+    for job_id in "${matched_filter_job_ids[@]}"; do
+      # squeue -h -j "$job_id" will list all tasks for that specific job array
+      active_jobs=$((active_jobs + $(squeue -h -r -j "$job_id" | wc -l)))
+    done
+    if [ "${active_jobs}" -eq 0 ]; then
+      break
+    fi
+    echo "${active_jobs} total matched-filter jobs (from all chunks and channels) still running/pending..."
+    sleep 30
+  done
+
+  echo "All matched-filter Slurm jobs have finished."
+fi
 
 shopt -s nullglob
 files_A=(output/round_0/chunk_*/matched_filter/matched_filter_snr_peaks_A_*.hdf)
@@ -136,6 +147,7 @@ hwilas_trigger_merge \
 mkdir -p output/round_0/coincidence
 
 hwilas_coincidence \
+  --verbose \
   --trigger-merge-files \
     LISA_A:output/round_0/trigger_merge/trigger_merge_A.hdf \
     LISA_E:output/round_0/trigger_merge/trigger_merge_E.hdf \

@@ -16,6 +16,7 @@ from hwilas import add_hwilas_common_options, init_logging
 from hwilas.parameters import mchirp_eta_from_mass1_mass2, mass1_mass2_from_mchirp_eta
 from hwilas.filter import matched_filter_frequencyseries, sigmasq_frequencyseries
 from hwilas.psd.read import from_txt as psd_from_txt
+from hwilas.waveforms.bbhx_utils import TIME_OFFSET_20_DEGREES
 from hwilas.types import KeyValueAction
 from hwilas.waveforms import get_fd_waveform
 
@@ -565,7 +566,7 @@ def main():
             'f_lower': args.f_lower,
             'low-frequency-cutoff': args.f_lower, 
             'tdi': args.tdi_generation,
-            't_offset': 0,
+            't_offset': TIME_OFFSET_20_DEGREES,
             'cutoff_deltat': 0,
             't_obs_start': int(tlen + 0.5),
             'delta_f': delta_f,

@@ -16,6 +16,7 @@ from hwilas import add_hwilas_common_options, init_logging
 from hwilas.filter import matched_filter_frequencyseries
 from hwilas.psd.read import from_txt as psd_from_txt
 from hwilas.template_banks.helpers import waveform_from_bank
+from hwilas.waveforms.bbhx_utils import TIME_OFFSET_20_DEGREES
 from hwilas.waveforms import get_fd_waveform
 
 logger = logging.getLogger(__name__)
@@ -155,9 +156,11 @@ def main():
         requested_start_time = float(args.start_time)
         requested_end_time = float(args.end_time)
     else:
-        effective_padding = padding_duration_from_file
-        requested_start_time = data_start_time + effective_padding
-        requested_end_time = data_end_time - effective_padding
+        # The data is asymmetrically padded, with the padding at the end.
+        # The analysis window is from the start of the data to the start
+        # of the padding.
+        requested_start_time = data_start_time
+        requested_end_time = data_end_time - padding_duration_from_file
 
     valid_start_time = max(requested_start_time, data_start_time)
     valid_end_time = min(requested_end_time, data_end_time)
@@ -191,9 +194,9 @@ def main():
         'f_lower': args.f_lower,
         'low-frequency-cutoff': 1e-6,
         'tdi': args.tdi_generation,
-        't_offset': 0, # This is an internal BBHx parameter, not related to physical duration
+        't_offset': TIME_OFFSET_20_DEGREES,
         'cutoff_deltat': 0,
-        't_obs_start': 30 * 86400.0, # Generate 30 days of physical waveform
+        't_obs_start': tlen,
         'delta_f': delta_f,
         'f_final': 1. / delta_t / 2 + delta_f / 2, # This is a hack to ensure we get the point at f_final returned
         'approximant': 'BBHX_PhenomHM',

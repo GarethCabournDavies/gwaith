@@ -11,13 +11,14 @@ import ldc.io.hdf5 as hdfio
 from ldc.lisa import orbits
 from ldc.waveform.lisabeta import FastBHB
 
-from gwaith.io import MultiDetOptionAction
+from gwaith.io import MultiOptionAction
 
 from hwilas import add_hwilas_common_options, init_logging
 from hwilas.data_processing.tdi import AET, to_timeseries
 from hwilas.filter import matched_filter_frequencyseries
 from hwilas.psd.read import from_txt as psd_from_txt
 from hwilas.waveforms import get_fd_waveform
+from hwilas.waveforms.bbhx_utils import TIME_OFFSET_20_DEGREES
 
 
 logger = logging.getLogger(__name__)
@@ -127,7 +128,8 @@ def main():
     parser.add_argument(
         "--psd-files",
         required=True,
-        action=MultiDetOptionAction,
+        action=MultiOptionAction,
+        nargs='+',
         help="Files containing PSD for optimal SNR and fitting factor calculations, given as channel:filename pairs"
     )
     parser.add_argument(
@@ -167,7 +169,8 @@ def main():
 
     tlen = args.waveform_end + args.waveform_start
     delta_t = 5
-    flen = tlen // 2 + 1
+    n_samples = int(tlen / delta_t)
+    flen = n_samples // 2 + 1
     delta_f = 1. / tlen
 
     logger.info("Loading PSD")
@@ -224,7 +227,7 @@ def main():
         'f_lower': 1e-6,
         'low-frequency-cutoff': 1e-6, 
         'tdi': args.tdi_generation,
-        't_offset': 0,
+        't_offset': TIME_OFFSET_20_DEGREES,
         'cutoff_deltat': 0,
         't_obs_start': int(args.waveform_start + args.waveform_end),
         'delta_f': delta_f,
@@ -259,7 +262,6 @@ def main():
         )
         
         wf = get_fd_waveform(
-            approximant=wf_params['approximant'],
             **wf_params,
             ifos=['LISA_A', 'LISA_E'],
         )

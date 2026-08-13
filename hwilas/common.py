@@ -41,13 +41,22 @@ def add_hwilas_common_options(
 _LOG_FORMAT = "%(levelname)s:%(asctime)s:%(name)s:%(message)s"
 _LOG_DATEFMT = "%Y-%m-%dT%H:%M:%S%z"
 
+_DEFAULT_REDUCE_LOGGING_LEVEL = [
+    "matplotlib.font_manager",
+    "Pegasus",
+]
+
+
+
 def init_logging(
     verbosity: int = 0,
     default_level: int = logging.WARNING,
-    reduce_logging_level: list[str] = None
+    reduce_logging_level: list[str] | None = _DEFAULT_REDUCE_LOGGING_LEVEL
 ) -> int:
     """Initialize unified logging format and return selected level.
-    You can also pass a list to reduce_logging_level if there are certain loggers which spam too much.
+
+    You can also pass a list to reduce_logging_level if there are
+    certain loggers which spam too much.
     (looking at you matplotlib.font_manager 👀)
     """
 

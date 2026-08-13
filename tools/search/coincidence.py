@@ -7,7 +7,7 @@ from matplotlib import use
 
 use('Agg')
 from matplotlib import pyplot as plt
-from gwaith.io import MultiDetOptionAction
+from gwaith.io import MultiOptionAction
 
 from hwilas import add_hwilas_common_options, init_logging
 
@@ -22,7 +22,7 @@ def main():
         "--trigger-merge-files",
         required=True,
         nargs=2,
-        action=MultiDetOptionAction,
+        action=MultiOptionAction,
         help="Merged trigger files ",
     )
 
@@ -77,17 +77,20 @@ def main():
 
     logger.info("Channels: %s", channels)
 
+    INITIAL_COINC_SIZE = 10000
     coincident_triggers = {
-        "template_id": [],
+        "template_id": np.empty(INITIAL_COINC_SIZE, dtype=np.int32),
     }
     for channel in channels:
         coincident_triggers.update({
-            f"time_{channel}": [],
-            f"snr_{channel}": [],
-            f"trigger_id_{channel}": [],
+            f"time_{channel}": np.empty(INITIAL_COINC_SIZE, dtype=np.float32),
+            f"snr_{channel}": np.empty(INITIAL_COINC_SIZE, dtype=np.float32),
+            f"trigger_id_{channel}": np.empty(INITIAL_COINC_SIZE, dtype=np.int32),
         })
+    n_coincs = 0
+    allocated_coincs = INITIAL_COINC_SIZE
 
-    # Open the files
+    # Load all trigger data into memory
     triggers = {
         channel: {}
         for channel in channels
@@ -104,57 +107,66 @@ def main():
     for template_idx in shared_template_ids:
         logger.info("Processing template %d", template_idx)
 
-        this_template = {
-            channel: triggers[channel]['template_id'] == template_idx
-            for i, channel in enumerate(channels)
-        }
+        indices_0 = np.where(triggers[channels[0]]['template_id'] == template_idx)[0]
+        indices_1 = np.where(triggers[channels[1]]['template_id'] == template_idx)[0]
 
-        trigger_times_0 = triggers[channels[0]]['end_time'][this_template[channels[0]]]
-        trigger_times_1 = triggers[channels[1]]['end_time'][this_template[channels[1]]]
-        trigger_snrs_0 = triggers[channels[0]]['snr'][this_template[channels[0]]]
-        trigger_snrs_1 = triggers[channels[1]]['snr'][this_template[channels[1]]]
+        if not indices_0.size or not indices_1.size:
+            continue
 
-        for idx_one, time_0 in enumerate(trigger_times_0):
+        trigger_times_0 = triggers[channels[0]]['end_time'][indices_0]
+        trigger_times_1 = triggers[channels[1]]['end_time'][indices_1]
+        trigger_snrs_0 = triggers[channels[0]]['snr'][indices_0]
+        trigger_snrs_1 = triggers[channels[1]]['snr'][indices_1]
+
+        for local_idx_0, time_0 in enumerate(trigger_times_0):
             left = np.searchsorted(trigger_times_1, time_0 - args.coincidence_window)
             right = np.searchsorted(trigger_times_1, time_0 + args.coincidence_window)
 
             if (right - left) == 1:
                 # Coincident triggers!
                 logger.debug(
-                    "Trigger at time %.1f in channel %s is within coincidence "
-                    "window of trigger in %s at time %.1f",
+                    "Trigger at time %.1f in channel %s is within "
+                    "coincidence window of trigger in %s at time %.1f",
                     time_0,
                     channels[0],
                     channels[1],
                     trigger_times_1[left],
                 )
-                # Add to the list of triggers
-                coincident_triggers['template_id'].append(template_idx)
-                coincident_triggers[f'trigger_id_{channels[0]}'].append(idx_one)
-                coincident_triggers[f'trigger_id_{channels[1]}'].append(left)
-                # SNR and time could be got from indexing on the trigger merge files, but add these in so that
-                # everything is in one place - this may need updated later
-                coincident_triggers[f'time_{channels[0]}'].append(time_0)
-                coincident_triggers[f'snr_{channels[0]}'].append(trigger_snrs_0[idx_one])
-                coincident_triggers[f'time_{channels[1]}'].append(trigger_times_1[left])
-                coincident_triggers[f'snr_{channels[1]}'].append(trigger_snrs_1[left])
+
+                if n_coincs >= allocated_coincs:
+                    new_size = allocated_coincs + INITIAL_COINC_SIZE
+                    logger.info("Resizing coincident trigger arrays to %d", new_size)
+                    for key in coincident_triggers:
+                        coincident_triggers[key].resize(new_size, refcheck=False)
+                    allocated_coincs = new_size
+
+                global_idx_0 = indices_0[local_idx_0]
+                global_idx_1 = indices_1[left]
+
+                coincident_triggers['template_id'][n_coincs] = template_idx
+                coincident_triggers[f'trigger_id_{channels[0]}'][n_coincs] = global_idx_0
+                coincident_triggers[f'trigger_id_{channels[1]}'][n_coincs] = global_idx_1
+                coincident_triggers[f'time_{channels[0]}'][n_coincs] = time_0
+                coincident_triggers[f'snr_{channels[0]}'][n_coincs] = trigger_snrs_0[local_idx_0]
+                coincident_triggers[f'time_{channels[1]}'][n_coincs] = trigger_times_1[left]
+                coincident_triggers[f'snr_{channels[1]}'][n_coincs] = trigger_snrs_1[left]
+                n_coincs += 1
+
             elif (right - left) > 1:
                 # This case is not handled yet.
-                # It means multiple triggers from channel 1 fall within the window of a single trigger from channel 0.
+                # It means multiple triggers from channel 1 fall within the
+                # window of a single trigger from channel 0.
                 raise RuntimeError(
                     "Multiple triggers found within the coincidence window"
                 )
 
-    # Convert to numpy arrays
-    for key, value in coincident_triggers:
-        if any(key.startswith(s) for s in ['template_id', 'timeslide_id', 'trigger_id']):
-            dtype = np.int32
-        else:
-            dtype = np.float32
-        value = np.array(value, dtype=dtype)
+    # Trim arrays to the actual number of coincidences
+    for key in coincident_triggers:
+        coincident_triggers[key] = coincident_triggers[key][:n_coincs]
+
     logger.info(
         "Found %d coincident triggers",
-        len(coincident_triggers['template_id'])
+        n_coincs
     )
 
     # Now lets do some clustering - cluster by qstatistic
@@ -171,14 +183,14 @@ def main():
     ) ** 0.5
     # coinc_tids = coincident_triggers['template_id'][:]
 
-    n_coincs = len(coinc_time)
+    n_coincs_before_clustering = len(coinc_time)
 
     # Now, perform a standard greedy clustering on the coincs
     # First, sort by statistic - loudest first
     indices = np.argsort(coinc_stat)[::-1]
 
-    keep = np.ones(n_coincs, dtype=bool)
-    for sorted_coinc_idx in range(n_coincs):
+    keep = np.ones(n_coincs_before_clustering, dtype=bool)
+    for sorted_coinc_idx in range(n_coincs_before_clustering):
         coinc_idx = indices[sorted_coinc_idx]
         if not keep[coinc_idx]:
             continue
@@ -190,11 +202,15 @@ def main():
     for key in coincident_triggers:
         clustered_coincident_triggers[key] = coincident_triggers[key][keep]
 
-    logger.info("%d out of %d coincidences remain after clustering", clustered_coincident_triggers['template_id'].size, n_coincs)
+    logger.info(
+        "%d out of %d coincidences remain after clustering",
+        clustered_coincident_triggers['template_id'].size,
+        n_coincs_before_clustering
+    )
 
     logger.info("Outputting to file")
     with h5py.File(args.output_file, 'w') as output_trigger_file:
-        for key, value in clustered_coincident_triggers:
+        for key, value in clustered_coincident_triggers.items():
             output_trigger_file.create_dataset(
                 key,
                 data=value,

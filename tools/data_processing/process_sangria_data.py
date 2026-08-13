@@ -13,8 +13,6 @@ from matplotlib import use
 
 use('Agg')
 
-from gwaith.types import TimeSeries
-
 from hwilas import add_hwilas_common_options, init_logging
 from hwilas.data_processing.inpainting import gate_and_paint
 from hwilas.data_processing.sangria import load_sangria_timeseries
