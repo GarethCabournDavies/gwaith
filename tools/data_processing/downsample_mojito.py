@@ -31,6 +31,13 @@ def load_arguments():
         default=4,
         help="Sample rate to resample the data to. Must be an integer multiple of the delta_t in the file"
     )
+    parser.add_argument(
+        "--low-cutoff-freq",
+        type=float,
+        default=1e-5,
+        help="Lower passband edge frequency for the bandpass filter (Hz). "
+             "Frequencies below this are attenuated. Default: 1e-5"
+    )
 
     return parser.parse_args()
 
@@ -46,7 +53,8 @@ def main():
     data = load_downsample_mojito(
         args.data_file,
         args.downsample_delta_t,
-        channels=channels
+        channels=channels,
+        low_cutoff_freq=args.low_cutoff_freq,
     )
     
     for channel in channels:

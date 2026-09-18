@@ -55,9 +55,11 @@ def test_matched_filter_matches_pycbc():
         epoch=float(data_fd.epoch),
     )
 
+    # hwilas returns a real-valued SNR (the real part of PyCBC's complex
+    # matched-filter output); compare accordingly.
     np.testing.assert_allclose(
         np.asarray(actual),
-        np.asarray(expected),
+        np.asarray(expected).real,
         rtol=1e-10,
         atol=1e-12,
     )
@@ -78,9 +80,11 @@ def test_matched_filter_matches_pycbc_without_psd():
         epoch=float(data_fd.epoch),
     )
 
+    # hwilas returns a real-valued SNR (the real part of PyCBC's complex
+    # matched-filter output); compare accordingly.
     np.testing.assert_allclose(
         np.asarray(actual),
-        np.asarray(expected),
+        np.asarray(expected).real,
         rtol=1e-10,
         atol=1e-12,
     )

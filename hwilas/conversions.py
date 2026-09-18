@@ -97,3 +97,23 @@ def chi_eff_from_component_spins(
     if scalar_output:
         return float(chi_eff)
     return chi_eff
+
+
+def spin_z_from_magnitude_and_polar_angle(
+    spin_magnitude: NumericInput,
+    polar_angle: NumericInput,
+) -> float | FloatArray:
+    """Project a spin magnitude onto the line-of-sight z component.
+
+    For a spin magnitude ``|chi|`` and polar angle ``theta`` from the z-axis,
+    the observable z-projection is ``|chi| * cos(theta)``.
+    """
+    scalar_output = _all_scalar(spin_magnitude, polar_angle)
+    spin_mag_arr = np.asarray(spin_magnitude, dtype=float)
+    polar_angle_arr = np.asarray(polar_angle, dtype=float)
+    spin_mag_arr, polar_angle_arr = np.broadcast_arrays(spin_mag_arr, polar_angle_arr)
+
+    spin_z = spin_mag_arr * np.cos(polar_angle_arr)
+    if scalar_output:
+        return float(spin_z)
+    return spin_z

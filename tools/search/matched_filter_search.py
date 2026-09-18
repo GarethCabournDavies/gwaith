@@ -5,7 +5,6 @@ This is a script to run matched filtering using a basic template bank search
 # Import necessary libraries
 import argparse  # Library for parsing command-line arguments
 import logging  # Library for logging messages
-from matplotlib import pyplot as plt
 import h5py  # Library for interacting with HDF5 files
 import numpy as np
 
@@ -17,7 +16,17 @@ from hwilas.filter import matched_filter_frequencyseries
 from hwilas.psd.read import from_txt as psd_from_txt
 from hwilas.template_banks.helpers import waveform_from_bank
 from hwilas.waveforms.bbhx_utils import TIME_OFFSET_20_DEGREES
-from hwilas.waveforms import get_fd_waveform
+from hwilas.waveforms import (
+    AET_CHANNELS,
+    FASTBHB_CHANNELS,
+    LISA_CHANNELS,
+    get_fd_waveform,
+)
+from hwilas.waveforms.unified_generation import generate_waveform
+
+# Channels accepted by the PhenomX time-domain generator: XYZ directly, or AET
+# via the XYZ -> AET rotation.
+PHENOMX_TD_CHANNELS = LISA_CHANNELS + AET_CHANNELS
 
 logger = logging.getLogger(__name__)
 
@@ -77,7 +86,6 @@ def main():
     parser.add_argument(
         "--snr-threshold",
         type=float,
-        default=4,
         help="Remove any SNR peaks which have SNR values below this threshold"
     )
 
@@ -93,6 +101,29 @@ def main():
         choices=['1.5','2'],
         default="1.5",
         help="Which generation of TDI to use when generating the waveform"
+    )
+
+    parser.add_argument(
+        '--waveform-type',
+        choices=['bbhx', 'phenomx_td', 'fastbhb'],
+        default='bbhx',
+        help="Waveform generator to use for the template bank. 'bbhx' uses the "
+             "frequency-domain BBHx approximant (default); 'phenomx_td' uses the "
+             "time-domain PhenomXPy + TDISpline generator, which returns XYZ-frame "
+             "channels (LISA_X/LISA_Y/LISA_Z) or AET; 'fastbhb' uses the LDC FastBHB "
+             "(lisabeta) time-domain generator, which returns AET channels "
+             "(LISA_A/LISA_E/LISA_T). The TDI generation is set via --tdi-generation."
+    )
+
+    parser.add_argument(
+        '--orbit',
+        choices=['oem', 'analytic'],
+        default='analytic',
+        help="Source of the LISA orbits for the PhenomX time-domain generator. "
+             "'analytic' (default) uses an unbounded Keplerian orbit model and can "
+             "be used for data outside the OEM ephemeris domain; 'oem' uses the "
+             "bundled finite OEM ephemeris, so detector times must lie within its "
+             "domain. Ignored by the BBHx waveform type."
     )
 
     parser.add_argument("--template-fraction-range", default="0/1",
@@ -113,11 +144,6 @@ def main():
         "--output-file",
         required=True,
         help="File to store output peaks in SNR"
-    )
-
-    parser.add_argument(
-        "--testing-plots",
-        help="Generate plots used for testing in this directory"
     )
 
     # Parse the command-line arguments provided by the user
@@ -190,6 +216,25 @@ def main():
 
     # Set the defaults required for the waveform parameters.
     # Use the final (possibly padded) data length so FFT sizes are consistent.
+    if args.waveform_type == 'phenomx_td':
+        approximant = 'PhenomX_TD'
+        # The PhenomX time-domain generator returns a *time-series* of ``length``
+        # samples, so its frequency resolution is 1 / (length * delta_t). That must
+        # equal the data's delta_f for matched filtering, hence length must be the
+        # number of time samples (padded_dlen), not the FFT bin count (flen).
+        wf_length = int(padded_dlen)
+    elif args.waveform_type == 'fastbhb':
+        approximant = 'FastBHB'
+        # The FastBHB time-domain generator likewise returns a *time-series* of
+        # ``length`` samples spanning [start_time, start_time + length * delta_t).
+        # Its frequency resolution must match the data's delta_f, so ``length`` is
+        # the number of time samples (padded_dlen), not the FFT bin count (flen).
+        wf_length = int(padded_dlen)
+    else:
+        approximant = 'BBHX_PhenomD'
+        # The BBHx frequency-domain generator expects the one-sided FFT length.
+        wf_length = int(flen)
+
     waveform_params_shared = {
         'f_lower': args.f_lower,
         'low-frequency-cutoff': 1e-6,
@@ -199,10 +244,38 @@ def main():
         't_obs_start': tlen,
         'delta_f': delta_f,
         'f_final': 1. / delta_t / 2 + delta_f / 2, # This is a hack to ensure we get the point at f_final returned
-        'approximant': 'BBHX_PhenomHM',
+        'approximant': approximant,
         'mode_array': [(2, 2)],
-        'length': int(flen),
+        'length': wf_length,
+        'tc': tlen,
+        # True data sampling interval (seconds). The PhenomX time-domain path uses
+        # this to build its detector-frame time grid; without it the grid would be
+        # derived from the FFT parameters and could mismatch the data.
+        'delta_t': delta_t,
     }
+
+    # The PhenomX time-domain generator accepts an `orbit` source ('oem' or
+    # 'analytic'); the BBHx path ignores it. Only forward it for the relevant
+    # waveform type to keep the parameter set clean.
+    if args.waveform_type == 'phenomx_td':
+        waveform_params_shared['orbit'] = args.orbit
+
+    # The PhenomX time-domain generator returns XYZ-frame channels (LISA_X/Y/Z),
+    # optionally rotated to AET (LISA_A/E/T); the BBHx path returns AET channels
+    # (LISA_A/E). Validate that the requested channel is compatible with the
+    # chosen waveform type before starting.
+    if args.waveform_type == 'phenomx_td' and args.channel not in PHENOMX_TD_CHANNELS:
+        raise ValueError(
+            f"Channel {args.channel} is not a PhenomX time-domain XYZ/AET channel. "
+            f"Expected one of {PHENOMX_TD_CHANNELS}."
+        )
+
+    # The FastBHB time-domain generator returns AET channels (LISA_A/E/T).
+    if args.waveform_type == 'fastbhb' and args.channel not in FASTBHB_CHANNELS:
+        raise ValueError(
+            f"Channel {args.channel} is not a FastBHB AET channel. "
+            f"Expected one of {FASTBHB_CHANNELS}."
+        )
 
     logger.info("Loading PSD")
     psd = psd_from_txt(
@@ -225,14 +298,6 @@ def main():
 
     data_fs = data.to_frequencyseries()
 
-    if args.testing_plots is not None:
-        whitened_data = (data_fs / psd).to_timeseries()
-        fig, ax = plt.subplots()
-        ax.plot(whitened_data.sample_times, whitened_data, label=f"whitened data {args.channel}")
-        ax.legend(loc='upper right')
-        fig.savefig(f'{args.testing_plots}/whitened_data_{args.channel}.png')
-        plt.close(fig)
-
     logger.info("Beginning filtering with bank %s", args.bank_file)
 
     output_triggers = {
@@ -240,6 +305,11 @@ def main():
         "end_time": [],
         "snr": [],
     }
+    # Templates that were processed but did not yield any trigger rows (e.g. no
+    # valid SNR samples in the filtering window). Logged at the end so it is
+    # clear which templates are absent from the output file when a run is
+    # incomplete (partial range, OOM kill mid-loop, or per-template skips).
+    skipped_templates = []
 
     with h5py.File(args.bank_file, 'r') as bank_file:
         num_templates = len(bank_file['mass1'])
@@ -259,13 +329,26 @@ def main():
 
             logger.debug('Getting waveform')
 
+            # NOTE: This uses get_fd_waveform directly rather than the unified
+            # generate_waveform() interface used in plotting scripts. This is because
+            # matched filter search works with template banks (where parameters are
+            # pre-built by waveform_from_bank) rather than catalog entries.
+            # Both paths handle waveform generation identically; the unified interface
+            # is primarily designed for catalog-based workflows.
+            # The waveform is generated in the time domain (see get_fd_waveform)
+            # so that it can be (over)whitened before the template loop. For now,
+            # convert it back to the frequency domain for matched filtering.
+            # ``get_fd_waveform`` dispatches on the approximant: BBHx returns AET
+            # channels while the PhenomX time-domain path returns XYZ channels, so
+            # the requested channel must match the chosen waveform type (validated
+            # above).
             waveform = get_fd_waveform(
                 ifos=[args.channel], **bank_wf_params
             )
 
             logger.debug('Computing SNR')
             snr_ts = matched_filter_frequencyseries(
-                waveform[args.channel],
+                waveform[args.channel].to_frequencyseries(),
                 data_fs,
                 psd=psd,
                 n_samples=len(data),
@@ -280,7 +363,12 @@ def main():
             end_idx = min(len(snr_ts), end_idx)
 
             if end_idx <= start_idx:
-                logger.debug("No valid SNR samples remain for template %d", template_idx)
+                logger.warning(
+                    "No valid SNR samples remain for template %d; skipping. "
+                    "This template will be absent from the output file.",
+                    template_idx,
+                )
+                skipped_templates.append(template_idx)
                 continue
 
             snr_times = np.asarray(snr_ts.sample_times)[start_idx:end_idx]
@@ -297,20 +385,11 @@ def main():
             times_out = snr_times[clustered_indices]
             logger.debug("%d triggers remain after clustering", len(clustered_indices))
 
-            if args.testing_plots is not None:
-                fig, ax = plt.subplots()
-                ax.plot(snr_times / 86400, abs(snr_data))
-                ax.scatter(
-                    times_out / 86400,
-                    snrs_out,
-                    c='y',
-                    marker='*',
-                    zorder=50,
-                )
-                ax.set_xlabel('Time (days)')
-                ax.set_ylabel('SNR')
-                fig.savefig(f'{args.testing_plots}/snr_timeseries_{args.channel}_{template_idx}.png')
-                plt.close(fig)
+            if len(clustered_indices) == 0:
+                # No peak cleared the SNR threshold, so this template contributes
+                # no rows to the output. Record it so the summary below can name it.
+                skipped_templates.append(template_idx)
+
 
             output_triggers['template_id'] += [template_idx] * len(clustered_indices)
             output_triggers['end_time'] += times_out.tolist()
@@ -320,6 +399,26 @@ def main():
     output_triggers['end_time'] = np.array(output_triggers['end_time'], dtype=np.float32)
     output_triggers['snr'] = np.array(output_triggers['snr'], dtype=np.float32)
 
+    # Summarise which templates are absent from the output file. A template is
+    # "missing" if it was processed but produced no rows (no valid SNR samples or
+    # no peak above threshold). This makes incomplete runs diagnosable: compare
+    # this list against the logged "Using template range X to Y" line to see which
+    # templates never ran at all (e.g. the job was OOM-killed mid-loop).
+    processed_ids = set(range(tmin, tmax))
+    present_ids = set(int(x) for x in output_triggers['template_id'])
+    missing_from_output = sorted(processed_ids - present_ids)
+    n_processed = len(processed_ids)
+    if missing_from_output:
+        logger.warning(
+            "Matched filter incomplete: %d of %d templates produced no trigger rows. "
+            "Missing template ids (absent from output file): %s",
+            len(missing_from_output), n_processed, missing_from_output,
+        )
+    else:
+        logger.info(
+            "All %d templates in range [%d, %d) produced at least one trigger row.",
+            n_processed, tmin, tmax,
+        )
 
     logger.info("Outputting to file")
     with h5py.File(args.output_file, 'w') as output_trigger_file:

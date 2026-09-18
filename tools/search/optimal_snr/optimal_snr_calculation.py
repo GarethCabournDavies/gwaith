@@ -53,7 +53,7 @@ def load_ldc_timeseries(
 
     return AET(X,Y,Z, delta_t)
 
-def fast_tdi(lisa_orbits, mbhb, start_time, end_time, dt):
+def fast_tdi(lisa_orbits, mbhb, start_time, end_time, dt, tdi2=False):
 
     fast_hm = FastBHB(
         "MBHB",
@@ -66,7 +66,7 @@ def fast_tdi(lisa_orbits, mbhb, start_time, end_time, dt):
 
     A, E, T = fast_hm.get_td_tdiaet(
         template=mbhb,
-        tdi2=False
+        tdi2=tdi2
     )
 
     # Cut to the start/end time as appropriate
@@ -88,6 +88,7 @@ def generate_waveform_for_data(
     start_time,
     end_time,
     delta_t,
+    tdi2=False,
 ):
     wave = dict(zip(mbhb.dtype.names, mbhb)) 
     wave['Cadence'] = delta_t
@@ -96,7 +97,8 @@ def generate_waveform_for_data(
         wave,
         start_time,
         end_time,
-        delta_t
+        delta_t,
+        tdi2=tdi2,
     )
 
 
@@ -199,6 +201,7 @@ def main():
             data_start_time,
             data_end_time,
             delta_t,
+            tdi2=(args.tdi_generation == "2"),
         )
         mbhb_data[i] = waveform_for_removal
 
@@ -231,7 +234,7 @@ def main():
         'cutoff_deltat': 0,
         't_obs_start': int(args.waveform_start + args.waveform_end),
         'delta_f': delta_f,
-        'f_final': 0.2 / 2 + delta_f / 2, # This is a hack to ensure we get the point at f_final returned
+        'f_final':  1. / delta_t / 2 + delta_f / 2, # This is a hack to ensure we get the point at f_final returned
         'approximant':'BBHX_PhenomD',
         'mode_array':  [(2,2)],
         'length': flen,

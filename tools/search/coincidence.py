@@ -3,10 +3,6 @@ import logging
 
 import h5py
 import numpy as np
-from matplotlib import use
-
-use('Agg')
-from matplotlib import pyplot as plt
 from gwaith.io import MultiOptionAction
 
 from hwilas import add_hwilas_common_options, init_logging
@@ -36,10 +32,6 @@ def main():
         "--output-file",
         required=True,
         help="File to store output peaks in SNR"
-    )
-    parser.add_argument(
-        "--testing-plots",
-        help="Directory into which to store plots used for testing"
     )
 
     parser.add_argument(
@@ -216,129 +208,6 @@ def main():
                 data=value,
                 compression='gzip'
             )
-
-    # Print the 25 highest-statistic events
-
-    if args.testing_plots is not None:
-        logger.info("Plotting")
-
-        with h5py.File(args.expected_snr_file, 'r') as expected_snr_file:
-            mbhb_times = expected_snr_file["mbhb_time"][:]
-            expected_snrs = expected_snr_file["optimal_snr"][:] * expected_snr_file["fitting_factor"][:]
-
-        cnorm = plt.Normalize(
-            coincident_triggers['template_id'].min(),
-            coincident_triggers['template_id'].max()
-        )
-
-        fig, ax = plt.subplots(figsize=(10,4))
-
-        ax.scatter(
-            mbhb_times / 86400,
-            expected_snrs,
-            marker='x',
-            c='red',
-            label="MBHB expected SNR for this bank",
-            zorder=100
-        )
-        for mbhb_time in mbhb_times:
-            ax.axvline(mbhb_time / 86400, c='tab:pink', linestyle=':')
-
-        ax.scatter(
-            coincident_triggers[f'time_{channels[0]}'] / 86400,
-            coincident_triggers[f'snr_{channels[0]}'],
-            marker='^',
-            c=coincident_triggers['template_id'],
-            norm=cnorm,
-            cmap='jet',
-            alpha=0.1,
-        )
-        ax.scatter(
-            coincident_triggers[f'time_{channels[1]}'] / 86400,
-            coincident_triggers[f'snr_{channels[1]}'],
-            marker='v',
-            c=coincident_triggers['template_id'],
-            norm=cnorm,
-            cmap='jet',
-            alpha=0.1,
-        )
-        coinc_times_all = (
-            coincident_triggers[f'time_{channels[0]}'] + coincident_triggers[f'time_{channels[1]}']
-        ) / 2
-        coinc_stat_all = (
-            coincident_triggers[f'snr_{channels[0]}'] ** 2 + coincident_triggers[f'snr_{channels[1]}'] ** 2
-        ) ** 0.5
-        
-        im = ax.scatter(
-            coinc_times_all / 86400,
-            coinc_stat_all,
-            marker='o',
-            c=coincident_triggers['template_id'],
-            norm=cnorm,
-            cmap='jet',
-            alpha=0.1,
-        )
-        coinc_time_clustered = (
-            clustered_coincident_triggers[f'time_{channels[0]}'] + clustered_coincident_triggers[f'time_{channels[1]}']
-        ) / 2
-        coinc_stat_clustered = (
-            clustered_coincident_triggers[f'snr_{channels[0]}'] ** 2 + clustered_coincident_triggers[f'snr_{channels[1]}'] ** 2
-        ) ** 0.5
-        
-        ax.scatter(
-            coinc_time_clustered / 86400,
-            coinc_stat_clustered,
-            marker='*',
-            edgecolors='k',
-            c='y',
-            zorder=1000,
-            s=100
-        )
-        ax.scatter([],[], label='Network', c='k', marker='o')
-        ax.scatter([],[], label=channels[0], c='k', marker='^')
-        ax.scatter([],[], label=channels[1], c='k', marker='v')
-        ax.scatter([],[], label="Clustered", c='y', marker='*', edgecolors='k')
-        ax.legend(loc='upper right')
-
-        cb = plt.colorbar(im, ax=ax)
-        cb.set_label('Template ID')
-        
-        ax.set_xlabel('Time (days)')
-        ax.set_ylabel('SNR')
-        # ax.set_xlim(230, 240)
-        # ax.set_ylim(0, 200)
-        fig.savefig(f'{args.testing_plots}/coincident_triggers.png')
-        plt.close(fig)
-
-        fig, ax = plt.subplots()
-        bins = np.logspace(
-            np.log10(coinc_stat_clustered.min()),
-            np.log10(coinc_stat_clustered.max()),
-            100
-        )
-        hist_snr, bins = np.histogram(coinc_stat_clustered, bins=bins)
-        cumhist = np.cumsum(hist_snr[::-1])[::-1]
-        ax.step(
-            bins[:-1],
-            cumhist,
-            label="Clustered Coincs Statistic"
-        )
-        ax.set_xscale('log')
-        ax.set_yscale('log')
-        ax.set_xlabel('SNR')
-        ax.set_ylabel('Count of louder events (per year)')
-
-        sort_expected = np.argsort(expected_snrs)
-        ax.step(
-            expected_snrs[sort_expected],
-            np.arange(len(expected_snrs))[::-1] + 1,
-            label="Expected statistic for Signals"
-        )
-        ax.legend(loc='upper right')
-
-        fig.savefig(f'{args.testing_plots}/snr_histogram.png')
-        plt.close(fig)
-
 
 
     logger.info("Done!")

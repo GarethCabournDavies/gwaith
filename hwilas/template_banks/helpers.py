@@ -3,6 +3,14 @@ import copy
 import numpy
 
 
+def _first_existing_key(h5_group, candidates):
+    """Return the first existing dataset name from candidates, else None."""
+    for name in candidates:
+        if name in h5_group:
+            return name
+    return None
+
+
 def parse_mode_array(input_params):
     """Ensures mode_array argument in a dictionary of input parameters is
     a list of tuples of (l, m), where l and m are ints.
@@ -58,6 +66,16 @@ def waveform_from_bank(bank_file, idx, waveform_params_shared, data_length):
     bank_wf['eclipticlatitude'] = bank_file['eclipticlatitude'][idx]
     bank_wf['eclipticlongitude'] = bank_file['eclipticlongitude'][idx]
     bank_wf['distance'] = bank_file['distance'][idx]
+
+    # Coalescence phase is optional in bank rows; when present, propagate it
+    # explicitly so BBHx/FastBHB generators do not silently fall back to 0.
+    phase_field = _first_existing_key(
+        bank_file,
+        ['coa_phase', 'CoaPhase', 'PhaseAtCoalescence', 'phi_ref'],
+    )
+    if phase_field is not None:
+        bank_wf['coa_phase'] = bank_file[phase_field][idx]
+        bank_wf['phi_ref'] = bank_file[phase_field][idx]
 
     # Correctly call parse_mode_array by passing a dictionary
     temp_params = {'mode_array': bank_file["mode_array"][idx]}

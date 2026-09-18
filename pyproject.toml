@@ -10,18 +10,26 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
 	"numpy",
-	"bbhx @ git+https://github.com/titodalcanton/BBHx.git@py39-and-cleanup",
+	"bbhx @ git+ssh://git@github.com/titodalcanton/BBHx.git@py39-and-cleanup",
 	"scipy",
 	"matplotlib",
-	"gwaith @ git+https://github.com/uk-lisa-gs/gwaith.git",
-	"mojito"
+	"gwaith @ git+ssh://git@github.com/uk-lisa-gs/gwaith.git",
+	"mojito",
+    "mojito-processor @ git+https://github.com/OllieBurke/MojitoProcessor.git",
+    "phenomxpy",
+    "tdispline @ git+ssh://git@github.com/uk-lisa-gs/tdi-spline.git",
+    "lisaorbits",
+    "lisa-data-challenge",
+    "lisabeta",
+    "fastgb",
 ]
 
 [project.optional-dependencies]
+
 test = [
 	"pytest",
 	"pycbc",
-	"pycbc-bbhx-plugin @ git+https://github.com/gwastro/BBHX-waveform-model.git"
+	"pycbc-bbhx-plugin @ git+ssh://git@github.com/gwastro/BBHX-waveform-model.git"
 ]
 
 [project.scripts]
@@ -30,12 +38,27 @@ hwilas_matched_filter_search = "tools.search.matched_filter_search:main"
 hwilas_optimise_snr_peaks = "tools.search.optimise_snr_peaks:main"
 hwilas_process_sangria_data = "tools.data_processing.process_sangria_data:main"
 hwilas_process_mojito_data = "tools.data_processing.process_mojito_data:main"
+hwilas_process_and_pad_mojito_chunk = "tools.data_processing.process_and_pad_mojito_chunk:main"
+hwilas_split_pad_data = "tools.data_processing.split_pad_data:main"
 hwilas_trigger_merge = "tools.search.trigger_merge:main"
 hwilas_optimal_snr = "tools.search.optimal_snr.optimal_snr_calculation:main"
 hwilas_plot_bank = "tools.template_banks.plot_mbhb_bank:main"
 hwilas_downsample_mojito = "tools.data_processing.downsample_mojito:main"
 hwilas_estimate_mojito_psd = "tools.psd_estimation.estimate_mojito_psd:main"
 hwilas_estimate_sangria_psd = "tools.psd_estimation.estimate_sangria_psd:main"
+hwilas_plot_sangria_waveforms = "tools.plotting.plot_sangria_waveforms:main"
+hwilas_plot_mojito_waveforms = "tools.plotting.plot_mojito_waveforms:main"
+hwilas_plot_optimise_waveforms = "tools.plotting.plot_optimise_waveforms:main"
+hwilas_plot_trigger_merge = "tools.plotting.plot_trigger_merge:main"
+hwilas_plot_coincidence = "tools.plotting.plot_coincidence:main"
+hwilas_plot_split_pad_data = "tools.plotting.plot_split_pad_data:main"
+hwilas_plot_waveform_match = "tools.plotting.plot_waveform_match:main"
+hwilas_plot_subtracted_signals = "tools.search.plot_subtracted_signals:main"
+hwilas_plot_downsampled_mojito = "tools.plotting.plot_downsampled_mojito:main"
+hwilas_plot_matched_filter_snr_timeseries = "tools.plotting.plot_matched_filter_snr_timeseries:main"
+hwilas_plot_estimate_mojito_psd = "tools.plotting.plot_estimate_mojito_psd:main"
+hwilas_plot_chunked_data = "tools.plotting.plot_chunked_data:main"
+hwilas_extract_truth = "tools.data_processing.extract_truth:main"
 
 [tool.setuptools]
 packages = [
@@ -45,4 +68,6 @@ packages = [
 	"tools.search.optimal_snr",
 	"tools.psd_estimation",
 	"tools.template_banks",
+	"tools.plotting",
+	"tools.diagnostics",
 ]

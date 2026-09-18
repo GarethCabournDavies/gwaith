@@ -30,26 +30,33 @@ CHUNK_SIZE = 2 ** 22
 def load_downsample_sangria(
     input_path,
     downsample_delta_t,
-    channels=None
+    channels=None,
+    data_name="obs/tdi",
 ):
     """
     Process a Sangria file
+
+    The ``obs/tdi`` group stores second-generation TDI XYZ streams (the same
+    frame used by the ``--tdi-generation 2`` template generators), so the
+    linear AET rotation applied here is consistent with TDI-2 templates.
     """
     logger.info("Processing Sangria File %s", input_path)
     if channels is None:
         channels = ['LISA_A', 'LISA_E', 'LISA_T']
-
-    sangria_data, sangria_descr = hdfio.load_array(input_path, name="obs/tdi")
+    print(data_name)
+    sangria_data, sangria_descr = hdfio.load_array(input_path, name=data_name)
 
     delta_t = sangria_descr['dt']
     epoch = sangria_descr['t0']
 
     data = linear_AET_conversion(
-        sangria_data['X'], sangria_data['Y'], sangria_data['Z']
+        sangria_data['X'],
+        sangria_data['Y'],
+        sangria_data['Z']
     )
 
     if downsample_delta_t is None or delta_t == downsample_delta_t:
-        return to_timeseries(data, channels, delta_t, epoch)
+        return to_timeseries(data, delta_t, epoch)
 
     logger.info("Downsampling to %s", downsample_delta_t)
 

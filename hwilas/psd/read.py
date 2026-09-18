@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 
 import numpy as np
-from pycbc.types import FrequencySeries
+from gwaith.types import FrequencySeries
 
 logger = logging.getLogger(__name__)
 

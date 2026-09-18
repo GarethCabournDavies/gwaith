@@ -6,10 +6,6 @@ import logging
 
 import h5py
 import numpy as np
-from matplotlib import pyplot as plt
-from matplotlib import use
-
-use('Agg')
 
 
 from hwilas import add_hwilas_common_options, init_logging
@@ -29,10 +25,6 @@ def main():
         "--output-file",
         required=True,
         help="File to final list of output triggers"
-    )
-    parser.add_argument(
-        "--testing-plot",
-        help="Generate plots used for testing in this file"
     )
     parser.add_argument(
         "--cluster-window",
@@ -96,9 +88,6 @@ def main():
 
     logger.info("Total triggers after clustering: %d", merged_tids.size)
 
-    if args.testing_plot is not None:
-        fig, ax = plt.subplots()
-
     with h5py.File(args.output_file, 'w') as output_file:
         n_triggers = merged_tids.size
         tid_ds = output_file.create_dataset(
@@ -123,19 +112,6 @@ def main():
         time_ds[:] = merged_times
         snr_ds[:] = merged_snrs
 
-        if args.testing_plot is not None and n_triggers > 0:
-            ax.scatter(
-                merged_times,
-                merged_snrs,
-                c=merged_tids,
-                alpha=0.1,
-            )
-
-    if args.testing_plot is not None:
-        fig.savefig(args.testing_plot)
-        plt.close(fig)
-
-        
     logger.info("Done!")
 
 if __name__ == "__main__":

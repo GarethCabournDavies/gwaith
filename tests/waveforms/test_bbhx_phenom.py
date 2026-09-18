@@ -4,20 +4,6 @@ from unittest.mock import patch, MagicMock
 import numpy as np
 import pytest
 
-# Mock bbhx and pycbc before importing the module under test
-import sys
-
-# Mock bbhx
-mock_bbhx = MagicMock()
-mock_bbhx.utils.constants.YRSID_SI = 31536000.0
-mock_bbhx.utils.constants.L_SI = 2.5e9
-sys.modules["bbhx"] = mock_bbhx
-sys.modules["bbhx.utils"] = mock_bbhx.utils
-sys.modules["bbhx.utils.constants"] = mock_bbhx.utils.constants
-sys.modules["bbhx.waveformbuild"] = mock_bbhx.waveformbuild
-# We avoid mocking pycbc.types directly to prevent breaking pycbc's internal
-# 'scheme' mechanism, which was causing a RuntimeError.
-
 
 from hwilas.waveforms.bbhx_phenom import get_fd_waveform_from_bbhx
 
@@ -43,13 +29,26 @@ def waveform_params():
     }
 
 
+@pytest.fixture
+def mock_bbhwaveformfd():
+    """Patch BBHWaveformFD in the bbhx_phenom module namespace."""
+    with patch("hwilas.waveforms.bbhx_phenom.BBHWaveformFD") as mock_cls:
+        yield mock_cls
+
+
+def _set_dummy_waveform(mock_bbhwaveformfd, length):
+    """Configure the BBHWaveformFD mock to return a dummy waveform."""
+    dummy_wave = np.ones((3, length))
+    mock_bbhwaveformfd.return_value.return_value = dummy_wave
+
+
 @patch("hwilas.waveforms.bbhx_phenom.get_bbhx_parameter_dict")
 @patch("hwilas.waveforms.bbhx_phenom.FrequencySeries", new_callable=MagicMock)
-def test_get_fd_waveform_from_bbhx_call(mock_fs_class, mock_get_params, waveform_params):
+def test_get_fd_waveform_from_bbhx_call(
+    mock_fs_class, mock_get_params, waveform_params, mock_bbhwaveformfd
+):
     """Test the basic call structure of get_fd_waveform_from_bbhx."""
-    # Mock the waveform generator call to return a dummy waveform
-    dummy_wave = np.ones((3, waveform_params["length"]))
-    mock_bbhx.waveformbuild.BBHWaveformFD.return_value.return_value = (dummy_wave,)
+    _set_dummy_waveform(mock_bbhwaveformfd, waveform_params["length"])
     # Mock the parameter conversion to return a predictable dict
     mock_get_params.return_value = {
         "m1": 1.0, "m2": 1.0, "chi1z": 0.0, "chi2z": 0.0,
@@ -62,8 +61,8 @@ def test_get_fd_waveform_from_bbhx_call(mock_fs_class, mock_get_params, waveform
     # Check that the parameter conversion utility was called
     mock_get_params.assert_called_once()
     # Check that the BBHx waveform generator was instantiated and called
-    mock_bbhx.waveformbuild.BBHWaveformFD.assert_called_once()
-    mock_bbhx.waveformbuild.BBHWaveformFD.return_value.assert_called_once()
+    mock_bbhwaveformfd.assert_called_once()
+    mock_bbhwaveformfd.return_value.assert_called_once()
 
     # Check that the FrequencySeries class was called to construct the output
     assert mock_fs_class.called
@@ -72,39 +71,43 @@ def test_get_fd_waveform_from_bbhx_call(mock_fs_class, mock_get_params, waveform
 @patch("hwilas.waveforms.bbhx_phenom.get_bbhx_parameter_dict")
 @patch("hwilas.waveforms.bbhx_phenom.FrequencySeries", new_callable=MagicMock)
 def test_get_fd_waveform_from_bbhx_output(
-    mock_fs_class, mock_get_params, waveform_params
+    mock_fs_class, mock_get_params, waveform_params, mock_bbhwaveformfd
 ):
     """Test the output of the waveform function."""
-    dummy_wave = np.ones((3, waveform_params["length"]))
-    mock_bbhx.waveformbuild.BBHWaveformFD.return_value.return_value = (dummy_wave,)
+    _set_dummy_waveform(mock_bbhwaveformfd, waveform_params["length"])
 
     output = get_fd_waveform_from_bbhx(**waveform_params)
 
     assert "LISA_A" in output
     assert "LISA_E" in output
     assert "LISA_T" in output
-    # Check that the output values are the objects created by the mocked class
-    assert output["LISA_A"] is mock_fs_class.return_value
+    # With align_tc_zero=True, cyclic_time_shift should be called on each FS
+    mock_fs_class.return_value.cyclic_time_shift.assert_called()
+    # The output for each IFO should be the result of (shifted_fs * rescale)
+    shifted = mock_fs_class.return_value.cyclic_time_shift.return_value
+    assert output["LISA_A"] == shifted.__mul__.return_value
 
 
 @patch("hwilas.waveforms.bbhx_phenom.get_bbhx_parameter_dict")
 @patch("hwilas.waveforms.bbhx_phenom.FrequencySeries")
 def test_get_fd_waveform_from_bbhx_tdi2_rescaling(
-    mock_fs_class, mock_get_params, waveform_params
+    mock_fs_class, mock_get_params, waveform_params, mock_bbhwaveformfd
 ):
     """Test the TDI 2.0 rescaling."""
-    dummy_wave = np.ones((3, waveform_params["length"]))
-    mock_bbhx.waveformbuild.BBHWaveformFD.return_value.return_value = (dummy_wave,)
+    _set_dummy_waveform(mock_bbhwaveformfd, waveform_params["length"])
 
     # Mock the FrequencySeries so we can check the multiplication
     mock_fs_instance = MagicMock()
-    mock_fs_instance.sample_frequencies.data = np.arange(waveform_params["length"]) * waveform_params["delta_f"]
     mock_fs_class.return_value = mock_fs_instance
 
     get_fd_waveform_from_bbhx(tdi='2.0', **waveform_params)
 
-    # Check that the rescale factor was applied
-    assert mock_fs_instance.__imul__.called
+    # With align_tc_zero=True, the code does:
+    #   fs = FrequencySeries(...)
+    #   shifted = fs.cyclic_time_shift(shift_amount)
+    #   output[ifo] = shifted * rescale
+    # So __mul__ should be called on the result of cyclic_time_shift
+    mock_fs_instance.cyclic_time_shift.return_value.__mul__.assert_called()
 
 
 def test_get_fd_waveform_from_bbhx_invalid_length(waveform_params):

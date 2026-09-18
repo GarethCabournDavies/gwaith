@@ -1,55 +1,35 @@
-"""Estimate the PSD from a mojito data file."""
+"""Estimate the PSD from processed mojito data."""
 
 import argparse
 import logging
 
-from matplotlib import pyplot as plt
-from matplotlib import use
-
-use('Agg')
-
+import h5py
+import numpy as np
+from gwaith.types import TimeSeries
 
 from hwilas import add_hwilas_common_options, init_logging
-from hwilas.data_processing.mojito import (
-    load_downsample_mojito,
-)
+from hwilas.psd_estimation.smooth import add_smoothing_options, smooth_psd
+from hwilas.psd.interpolate import interpolate
 from hwilas.types import KeyValueAction
 
 logger = logging.getLogger(__name__)
 
 def load_arguments():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        description="Estimate the PSD from processed mojito data file."
+    )
     add_hwilas_common_options(parser)
     parser.add_argument(
         "--data-file",
         required=True,
+        help="Path to the processed mojito HDF5 file (output of hwilas_process_mojito_data)."
     )
     parser.add_argument(
-        "--delta-t",
-        type=float,
-        help="If given, loadf the Mojito data file with this dt rather than the file content - must be higher than the data dt"
-    )
-    parser.add_argument(
-        "--psd-files",
+        "--output-file",
         required=True,
+        nargs="+",
         action=KeyValueAction,
-        nargs='+',
-        help="PSD output files, one per channel, given as channel:filename pairs"
-    )
-    parser.add_argument(
-        "--downsample-delta-t",
-        type=float,
-        default=4,
-        help="Sample rate to resample the data to. Must be an integer multiple of the delta_t in the file"
-    )
-    parser.add_argument(
-        "--processor-options",
-        action=KeyValueAction,
-        nargs='+',
-    )
-    parser.add_argument(
-        "--output-plots",
-        default=None,
+        help="Output files for each channel, given as channel:filename pairs"
     )
     parser.add_argument(
         "--segment-duration",
@@ -59,10 +39,10 @@ def load_arguments():
         "calculation. Default 1576800 (18.25 days)"
     )
     parser.add_argument(
-        '--smoothing-frequencies',
-        type=float,
-        nargs='+',
+        "--testing-plots",
+        help="Directory to store plots used for testing"
     )
+    add_smoothing_options(parser)
 
     return parser.parse_args()
 
@@ -70,51 +50,95 @@ def load_arguments():
 def main():
     args = load_arguments()
     init_logging(args.verbose)
-    logger.info("Starting")
+    logger.info("Starting PSD estimation from processed mojito data")
 
-    channels = list(args.psd_files.keys())
+    channels = list(args.output_file.keys())
     logger.debug("Channels: %s", channels)
 
-    data = load_downsample_mojito(
-        args.data_file,
-        args.downsample_delta_t,
-        channels=channels
-    )
-    
-    logger.info("Calculating PSDs")
-    psds = {}
-    for channel in channels:
-        logger.debug("Calculating PSD for %s", channel)
-        # Getting Raw PSD
-        psds[channel] = data[channel].psd(
-            segment_duration=args.segment_duration
-        )
+    logger.info("Loading processed mojito data from %s", args.data_file)
+    with h5py.File(args.data_file, 'r') as f:
+        epoch = float(f.attrs.get("epoch", 0.0))
+        delta_t = float(f.attrs.get("delta_t", 1.0))
+        laser_frequency = f.attrs.get("laser_frequency", None)
 
-    if args.output_plots is not None:
-        logger.info("Plotting PSDs")
-        fig, ax = plt.subplots()
+        # Load requested channels from HDF5
+        timeseries = {}
         for channel in channels:
-            ax.plot(
-                psds[channel].sample_frequencies,
-                psds[channel].data,
-                label=channel
+            if channel not in f:
+                raise ValueError(
+                    f"Channel {channel} not found in {args.data_file}. "
+                    f"Available: {list(f.keys())}"
+                )
+            data_array = np.asarray(f[channel][:], dtype=float)
+            timeseries[channel] = TimeSeries(
+                data_array,
+                delta_t=delta_t,
+                epoch=epoch
+            )
+            logger.debug(
+                "Loaded %s: %d samples, delta_t=%.6f, epoch=%.2f",
+                channel,
+                len(data_array),
+                delta_t,
+                epoch
             )
 
+    tlen = len(timeseries[channels[0]])
+    delta_f = 1.0 / (tlen * delta_t)
 
+    logger.info("Calculating PSDs")
+    full_psds = {}
     for channel in channels:
-        logger.debug("Saving PSD to %s", args.psd_files[channel])
-        psds[channel].save(args.psd_files[channel])
+        logger.debug("Calculating PSD for %s", channel)
+        full_psds[channel] = timeseries[channel].psd(args.segment_duration)
 
-    if args.output_plots is not None:
-        ax.set_yscale('log')
-        ax.set_xscale('log')
-        ax.set_xlabel('Frequency (Hz)')
-        ax.set_xlim(1e-6, 0.1)
-        ax.set_ylabel('PSD')
-        ax.legend(loc='upper left')
-        fig.savefig(f"{args.output_plots}/mojito_psd.png")
+    logger.info("Interpolating PSDs to delta_f=%.6e", delta_f)
+    psds = {
+        channel: interpolate(full_psds[channel], delta_f)
+        for channel in channels
+    }
 
+    if args.smooth_regions:
+        logger.info("Applying smoothing to PSDs")
 
+        psds = smooth_psd(
+            psds,
+            channels,
+            args.smooth_regions,
+        )
+
+    logger.info("Saving PSDs")
+    for channel in channels:
+        output_path = args.output_file[channel]
+        logger.debug("Saving PSD for %s to %s", channel, output_path)
+        psds[channel].save(output_path)
+
+    if args.testing_plots:
+        import os
+        os.makedirs(args.testing_plots, exist_ok=True)
+        from matplotlib import pyplot as plt
+        from matplotlib import use
+        use('Agg')
+
+        for channel in channels:
+            fig, ax = plt.subplots()
+            ax.loglog(
+                full_psds[channel].sample_frequencies[1:],
+                np.sqrt(full_psds[channel].data[1:])
+            )
+            ax.set_xlabel('Frequency (Hz)')
+            ax.set_ylabel('Strain Hz^{-1}')
+            ax.set_title(f'Raw PSD: {channel}')
+            fig.savefig(os.path.join(args.testing_plots, f'{channel}_raw_psd.png'))
+            plt.close(fig)
+
+            fig, ax = plt.subplots()
+            ax.loglog(psds[channel].f_array, np.sqrt(psds[channel].data))
+            ax.set_xlabel('Frequency (Hz)')
+            ax.set_ylabel(f'Strain/{np.sqrt("Hz")}')
+            ax.set_title(f'Interpolated PSD: {channel}')
+            fig.savefig(os.path.join(args.testing_plots, f'{channel}_interp_psd.png'))
+            plt.close(fig)
 
     logger.info("Done!")
 

@@ -8,7 +8,8 @@ run_task() {
     local task_id=$1
     echo "Running task ${task_id} for channel @@CHANNEL@@ in chunk @@CHUNK_IDX@@"
     "@@TEMPLATE_SCRIPT_PATH@@" \
-        "@@CHUNK_OUTPUT_DIR@@" "@@CHANNEL@@" "${task_id}" "@@TEMPLATE_PARALLELIZATION@@"
+        "@@CHUNK_OUTPUT_DIR@@" "@@CHANNEL@@" "${task_id}" "@@TEMPLATE_PARALLELIZATION@@" \
+        "@@WAVEFORM_TYPE@@" "@@TDI_GENERATION@@" "@@BANK_FILE@@" "@@PSD_FILE_A@@" "@@PSD_FILE_E@@" "@@INPUT_DATA_FILE@@"
 }
 
 if [ -n "${SLURM_ARRAY_TASK_ID}" ]; then
