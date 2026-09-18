@@ -1,0 +1,714 @@
+{
+  "file": "examples/datasets/LDC2_sangria_hm_training.hdf",
+  "n_signals": 15,
+  "first_signal_full_record": {
+    "EclipticLatitude": [
+      -0.5641023936335077
+    ],
+    "EclipticLongitude": [
+      0.6109268516130327
+    ],
+    "PolarAngleOfSpin1": [
+      0.9089723456902256
+    ],
+    "PolarAngleOfSpin2": [
+      1.1816994499122777
+    ],
+    "Spin1": [
+      0.972661
+    ],
+    "Spin2": [
+      0.972862
+    ],
+    "Mass1": [
+      1015522.4376
+    ],
+    "Mass2": [
+      796849.1091
+    ],
+    "CoalescenceTime": [
+      4800021.15572853
+    ],
+    "PhaseAtCoalescence": [
+      4.275929308696054
+    ],
+    "InitialPolarAngleL": [
+      2.5775388853549464
+    ],
+    "InitialAzimuthalAngleL": [
+      4.094550225563854
+    ],
+    "Redshift": [
+      2.18186
+    ],
+    "Distance": [
+      17758.367941273442
+    ],
+    "ObservationDuration": [
+      31558149.763545603
+    ],
+    "Cadence": [
+      3.0
+    ],
+    "_index": 0
+  },
+  "metadata": {
+    "groups": {
+      "header": {
+        "date": {
+          "shape": [],
+          "dtype": "object"
+        }
+      },
+      "instru": {
+        "config": {
+          "LISA_AAFILTER_ATTENUATION": {
+            "shape": [],
+            "dtype": "int64"
+          },
+          "LISA_AAFILTER_TRANSITION_BAND_0": {
+            "shape": [],
+            "dtype": "float64"
+          },
+          "LISA_AAFILTER_TRANSITION_BAND_1": {
+            "shape": [],
+            "dtype": "float64"
+          },
+          "LISA_ACC_NOISE_A_LEVEL": {
+            "shape": [],
+            "dtype": "float64"
+          },
+          "LISA_ACC_NOISE_F_KNEE": {
+            "shape": [],
+            "dtype": "float64"
+          },
+          "LISA_ACC_NOISE_USE_PZM": {
+            "shape": [],
+            "dtype": "bool"
+          },
+          "LISA_ADC_RECURSION_ORDER": {
+            "shape": [],
+            "dtype": "int64"
+          },
+          "LISA_BACKLINK_NOISE_A_LEVEL": {
+            "shape": [],
+            "dtype": "float64"
+          },
+          "LISA_BACKLINK_NOISE_F_KNEE": {
+            "shape": [],
+            "dtype": "float64"
+          },
+          "LISA_DEBUG_CLOCK_OFFSETS": {
+            "shape": [],
+            "dtype": "bool"
+          },
+          "LISA_FREQUENCY_OFFSETS_12": {
+            "shape": [],
+            "dtype": "float64"
+          },
+          "LISA_FREQUENCY_OFFSETS_13": {
+            "shape": [],
+            "dtype": "float64"
+          },
+          "LISA_FREQUENCY_OFFSETS_21": {
+            "shape": [],
+            "dtype": "float64"
+          },
+          "LISA_FREQUENCY_OFFSETS_23": {
+            "shape": [],
+            "dtype": "float64"
+          },
+          "LISA_FREQUENCY_OFFSETS_31": {
+            "shape": [],
+            "dtype": "float64"
+          },
+          "LISA_FREQUENCY_OFFSETS_32": {
+            "shape": [],
+            "dtype": "float64"
+          },
+          "LISA_GLITCH_FILE": {
+            "shape": [],
+            "dtype": "object"
+          },
+          "LISA_GW_FILE_FS": {
+            "shape": [],
+            "dtype": "float64"
+          },
+          "LISA_GW_FILE_UPSAMPLING": {
+            "shape": [],
+            "dtype": "float64"
+          },
+          "LISA_GW_TYPE": {
+            "shape": [],
+            "dtype": "object"
+          },
+          "LISA_LASER_CENTRAL_FREQUENCY": {
+            "shape": [],
+            "dtype": "float64"
+          },
+          "LISA_LOCKING_SCHEME": {
+            "shape": [],
+            "dtype": "object"
+          },
+          "LISA_MEASUREMENT_DOWNSAMPLING": {
+            "shape": [],
+            "dtype": "int64"
+          },
+          "LISA_MEASUREMENT_FS": {
+            "shape": [],
+            "dtype": "float64"
+          },
+          "LISA_ORBIT_TYPE_0": {
+            "shape": [],
+            "dtype": "object"
+          },
+          "LISA_ORBIT_TYPE_1": {
+            "shape": [],
+            "dtype": "object"
+          },
+          "LISA_PHYSICS_FS": {
+            "shape": [],
+            "dtype": "float64"
+          },
+          "LISA_PRIMARY_LASER": {
+            "shape": [],
+            "dtype": "object"
+          },
+          "LISA_PUBLISH_BEATNOTE_COMPONENTS": {
+            "shape": [],
+            "dtype": "bool"
+          },
+          "LISA_PUBLISH_TOTAL_BEATNOTE": {
+            "shape": [],
+            "dtype": "bool"
+          },
+          "LISA_SIMULATE_DOPPLER": {
+            "shape": [],
+            "dtype": "bool"
+          },
+          "LISA_TDI_FS": {
+            "shape": [],
+            "dtype": "float64"
+          },
+          "OB_INDICES_0": {
+            "shape": [],
+            "dtype": "object"
+          },
+          "OB_INDICES_1": {
+            "shape": [],
+            "dtype": "object"
+          },
+          "OB_INDICES_2": {
+            "shape": [],
+            "dtype": "object"
+          },
+          "OB_INDICES_3": {
+            "shape": [],
+            "dtype": "object"
+          },
+          "OB_INDICES_4": {
+            "shape": [],
+            "dtype": "object"
+          },
+          "OB_INDICES_5": {
+            "shape": [],
+            "dtype": "object"
+          },
+          "SC_INDICES_0": {
+            "shape": [],
+            "dtype": "object"
+          },
+          "SC_INDICES_1": {
+            "shape": [],
+            "dtype": "object"
+          },
+          "SC_INDICES_2": {
+            "shape": [],
+            "dtype": "object"
+          },
+          "TDI_CLOCKCOR_MICHELSON": {
+            "shape": [],
+            "dtype": "bool"
+          },
+          "TDI_CLOCKCOR_ORTHVAR": {
+            "shape": [],
+            "dtype": "bool"
+          },
+          "TDI_CLOCKCOR_SAGNAC": {
+            "shape": [],
+            "dtype": "bool"
+          },
+          "TDI_GENERATION": {
+            "shape": [],
+            "dtype": "float64"
+          },
+          "TDI_INPUT_FORMAT": {
+            "shape": [],
+            "dtype": "object"
+          },
+          "TDI_MEASUREMENT_FS": {
+            "shape": [],
+            "dtype": "float64"
+          },
+          "TDI_PUBLISH_INTERVAR": {
+            "shape": [],
+            "dtype": "bool"
+          },
+          "TDI_PUBLISH_MICHELSON": {
+            "shape": [],
+            "dtype": "bool"
+          },
+          "TDI_PUBLISH_ORTHVAR": {
+            "shape": [],
+            "dtype": "bool"
+          },
+          "TDI_PUBLISH_SAGNAC": {
+            "shape": [],
+            "dtype": "bool"
+          },
+          "TDI_USE_DOPPLER_CORRECTION": {
+            "shape": [],
+            "dtype": "bool"
+          },
+          "TDI_USE_FREQUENCY_FLUCTUATIONS": {
+            "shape": [],
+            "dtype": "bool"
+          },
+          "TDI_USE_UPDATED_CLOCKCOR": {
+            "shape": [],
+            "dtype": "bool"
+          },
+          "TRIPLET_INDICES_0": {
+            "shape": [],
+            "dtype": "object"
+          },
+          "TRIPLET_INDICES_1": {
+            "shape": [],
+            "dtype": "object"
+          },
+          "TRIPLET_INDICES_2": {
+            "shape": [],
+            "dtype": "object"
+          },
+          "TRIPLET_INDICES_3": {
+            "shape": [],
+            "dtype": "object"
+          },
+          "TRIPLET_INDICES_4": {
+            "shape": [],
+            "dtype": "object"
+          },
+          "TRIPLET_INDICES_5": {
+            "shape": [],
+            "dtype": "object"
+          }
+        }
+      },
+      "obs": {
+        "config": {
+          "accnoise": {
+            "shape": [],
+            "dtype": "float64"
+          },
+          "backlinknoise": {
+            "shape": [],
+            "dtype": "float64"
+          },
+          "dirname": {
+            "shape": [],
+            "dtype": "object"
+          },
+          "dt": {
+            "shape": [],
+            "dtype": "float64"
+          },
+          "dt_instrument": {
+            "shape": [],
+            "dtype": "float64"
+          },
+          "dt_orbits": {
+            "shape": [],
+            "dtype": "float64"
+          },
+          "dt_tdi": {
+            "shape": [],
+            "dtype": "float64"
+          },
+          "initial_position": {
+            "shape": [],
+            "dtype": "float64"
+          },
+          "initial_rotation": {
+            "shape": [],
+            "dtype": "float64"
+          },
+          "interp_order": {
+            "shape": [],
+            "dtype": "int64"
+          },
+          "nbatch": {
+            "shape": [],
+            "dtype": "int64"
+          },
+          "nominal_arm_length": {
+            "shape": [],
+            "dtype": "float64"
+          },
+          "orbit_type": {
+            "shape": [],
+            "dtype": "object"
+          },
+          "physic_upsampling": {
+            "shape": [],
+            "dtype": "int64"
+          },
+          "readoutnoise": {
+            "shape": [],
+            "dtype": "float64"
+          },
+          "sim_kaiser_attenuation": {
+            "shape": [],
+            "dtype": "int64"
+          },
+          "sim_kaiser_delay": {
+            "shape": [],
+            "dtype": "float64"
+          },
+          "sim_kaiser_passband": {
+            "shape": [],
+            "dtype": "float64"
+          },
+          "sim_kaiser_stopband": {
+            "shape": [],
+            "dtype": "float64"
+          },
+          "t_max": {
+            "shape": [],
+            "dtype": "float64"
+          },
+          "t_min": {
+            "shape": [],
+            "dtype": "float64"
+          },
+          "tdi_kaiser_attenuation": {
+            "shape": [],
+            "dtype": "int64"
+          },
+          "tdi_kaiser_cutoff": {
+            "shape": [],
+            "dtype": "float64"
+          },
+          "tdi_kaiser_delay": {
+            "shape": [],
+            "dtype": "int64"
+          },
+          "tdi_kaiser_passband": {
+            "shape": [],
+            "dtype": "float64"
+          },
+          "tdi_kaiser_stopband": {
+            "shape": [],
+            "dtype": "float64"
+          },
+          "travel_time_order": {
+            "shape": [],
+            "dtype": "int64"
+          }
+        },
+        "tdi": {
+          "shape": [
+            6307200,
+            1
+          ],
+          "dtype": "[('t', '<f8'), ('X', '<f8'), ('Y', '<f8'), ('Z', '<f8')]"
+        }
+      },
+      "sky": {
+        "dgb": {
+          "cat": {
+            "shape": [
+              26000000,
+              1
+            ],
+            "dtype": "[('Name', '<i8'), ('Amplitude', '<f8'), ('EclipticLatitude', '<f8'), ('EclipticLongitude', '<f8'), ('Frequency', '<f8'), ('FrequencyDerivative', '<f8'), ('Inclination', '<f8'), ('InitialPhase', '<f8'), ('Polarization', '<f8')]"
+          },
+          "config": {
+            "approximant": {
+              "shape": [],
+              "dtype": "object"
+            },
+            "catalogs": {
+              "shape": [],
+              "dtype": "object"
+            },
+            "nsource": {
+              "shape": [],
+              "dtype": "int64"
+            },
+            "random_frequency": {
+              "shape": [],
+              "dtype": "object"
+            },
+            "random_inclination": {
+              "shape": [],
+              "dtype": "object"
+            },
+            "random_mass": {
+              "shape": [],
+              "dtype": "object"
+            },
+            "seed": {
+              "shape": [],
+              "dtype": "int64"
+            },
+            "snr_0": {
+              "shape": [],
+              "dtype": "float64"
+            },
+            "snr_1": {
+              "shape": [],
+              "dtype": "float64"
+            },
+            "source_type": {
+              "shape": [],
+              "dtype": "object"
+            }
+          },
+          "tdi": {
+            "shape": [
+              6307200,
+              1
+            ],
+            "dtype": "[('t', '<f8'), ('X', '<f8'), ('Y', '<f8'), ('Z', '<f8')]"
+          }
+        },
+        "igb": {
+          "cat": {
+            "shape": [
+              3000000,
+              1
+            ],
+            "dtype": "[('Name', 'S7'), ('Amplitude', '<f8'), ('EclipticLatitude', '<f8'), ('EclipticLongitude', '<f8'), ('Frequency', '<f8'), ('FrequencyDerivative', '<f4'), ('Inclination', '<f8'), ('InitialPhase', '<f8'), ('Polarization', '<f8')]"
+          },
+          "config": {
+            "approximant": {
+              "shape": [],
+              "dtype": "object"
+            },
+            "catalogs": {
+              "shape": [],
+              "dtype": "object"
+            },
+            "nsource": {
+              "shape": [],
+              "dtype": "int64"
+            },
+            "random_frequency": {
+              "shape": [],
+              "dtype": "object"
+            },
+            "random_inclination": {
+              "shape": [],
+              "dtype": "object"
+            },
+            "random_mass": {
+              "shape": [],
+              "dtype": "object"
+            },
+            "seed": {
+              "shape": [],
+              "dtype": "int64"
+            },
+            "source_type": {
+              "shape": [],
+              "dtype": "object"
+            }
+          },
+          "tdi": {
+            "shape": [
+              6307200,
+              1
+            ],
+            "dtype": "[('t', '<f8'), ('X', '<f8'), ('Y', '<f8'), ('Z', '<f8')]"
+          }
+        },
+        "mbhb": {
+          "cat": {
+            "shape": [
+              15,
+              1
+            ],
+            "dtype": "[('EclipticLatitude', '<f8'), ('EclipticLongitude', '<f8'), ('PolarAngleOfSpin1', '<f8'), ('PolarAngleOfSpin2', '<f8'), ('Spin1', '<f8'), ('Spin2', '<f8'), ('Mass1', '<f8'), ('Mass2', '<f8'), ('CoalescenceTime', '<f8'), ('PhaseAtCoalescence', '<f8'), ('InitialPolarAngleL', '<f8'), ('InitialAzimuthalAngleL', '<f8'), ('Redshift', '<f8'), ('Distance', '<f8'), ('ObservationDuration', '<f8'), ('Cadence', '<f8')]"
+          },
+          "config": {
+            "approximant": {
+              "shape": [],
+              "dtype": "object"
+            },
+            "catalogs": {
+              "shape": [],
+              "dtype": "object"
+            },
+            "coalescence_time_0": {
+              "shape": [],
+              "dtype": "float64"
+            },
+            "coalescence_time_1": {
+              "shape": [],
+              "dtype": "float64"
+            },
+            "indices_0": {
+              "shape": [],
+              "dtype": "int64"
+            },
+            "indices_1": {
+              "shape": [],
+              "dtype": "int64"
+            },
+            "indices_10": {
+              "shape": [],
+              "dtype": "int64"
+            },
+            "indices_11": {
+              "shape": [],
+              "dtype": "int64"
+            },
+            "indices_12": {
+              "shape": [],
+              "dtype": "int64"
+            },
+            "indices_13": {
+              "shape": [],
+              "dtype": "int64"
+            },
+            "indices_14": {
+              "shape": [],
+              "dtype": "int64"
+            },
+            "indices_2": {
+              "shape": [],
+              "dtype": "int64"
+            },
+            "indices_3": {
+              "shape": [],
+              "dtype": "int64"
+            },
+            "indices_4": {
+              "shape": [],
+              "dtype": "int64"
+            },
+            "indices_5": {
+              "shape": [],
+              "dtype": "int64"
+            },
+            "indices_6": {
+              "shape": [],
+              "dtype": "int64"
+            },
+            "indices_7": {
+              "shape": [],
+              "dtype": "int64"
+            },
+            "indices_8": {
+              "shape": [],
+              "dtype": "int64"
+            },
+            "indices_9": {
+              "shape": [],
+              "dtype": "int64"
+            },
+            "mass_ratio_0": {
+              "shape": [],
+              "dtype": "int64"
+            },
+            "mass_ratio_1": {
+              "shape": [],
+              "dtype": "int64"
+            },
+            "mass_total_0": {
+              "shape": [],
+              "dtype": "int64"
+            },
+            "mass_total_1": {
+              "shape": [],
+              "dtype": "int64"
+            },
+            "nsource": {
+              "shape": [],
+              "dtype": "int64"
+            },
+            "seed": {
+              "shape": [],
+              "dtype": "int64"
+            },
+            "source_type": {
+              "shape": [],
+              "dtype": "object"
+            },
+            "spin1_0": {
+              "shape": [],
+              "dtype": "float64"
+            },
+            "spin1_1": {
+              "shape": [],
+              "dtype": "float64"
+            },
+            "spin2_0": {
+              "shape": [],
+              "dtype": "float64"
+            },
+            "spin2_1": {
+              "shape": [],
+              "dtype": "float64"
+            }
+          },
+          "tdi": {
+            "shape": [
+              6307200,
+              1
+            ],
+            "dtype": "[('t', '<f8'), ('X', '<f8'), ('Y', '<f8'), ('Z', '<f8')]"
+          }
+        },
+        "vgb": {
+          "cat": {
+            "shape": [
+              36,
+              1
+            ],
+            "dtype": "[('Name', 'S9'), ('Amplitude', '<f8'), ('Distance', '<f8'), ('Drift', '<f8'), ('EclipticLatitude', '<f8'), ('EclipticLongitude', '<f8'), ('ErrorDistance', '<f8'), ('ErrorMass1', '<f8'), ('ErrorMass2', '<f8'), ('Frequency', '<f8'), ('FrequencyDerivative', '<f8'), ('GalacticLatitude', '<f8'), ('GalacticLongitude', '<f8'), ('Inclination', '<f8'), ('InitialPhase', '<f8'), ('Mass1', '<f8'), ('Mass2', '<f8'), ('Period', '<f8'), ('Polarization', '<f8')]"
+          },
+          "config": {
+            "approximant": {
+              "shape": [],
+              "dtype": "object"
+            },
+            "catalogs": {
+              "shape": [],
+              "dtype": "object"
+            },
+            "nsource": {
+              "shape": [],
+              "dtype": "int64"
+            },
+            "seed": {
+              "shape": [],
+              "dtype": "int64"
+            },
+            "source_type": {
+              "shape": [],
+              "dtype": "object"
+            }
+          },
+          "tdi": {
+            "shape": [
+              6307200,
+              1
+            ],
+            "dtype": "[('t', '<f8'), ('X', '<f8'), ('Y', '<f8'), ('Z', '<f8')]"
+          }
+        }
+      }
+    }
+  }
+}

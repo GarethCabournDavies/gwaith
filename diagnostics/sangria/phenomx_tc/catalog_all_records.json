@@ -1,0 +1,767 @@
+[
+  {
+    "EclipticLatitude": [
+      -0.5641023936335077
+    ],
+    "EclipticLongitude": [
+      0.6109268516130327
+    ],
+    "PolarAngleOfSpin1": [
+      0.9089723456902256
+    ],
+    "PolarAngleOfSpin2": [
+      1.1816994499122777
+    ],
+    "Spin1": [
+      0.972661
+    ],
+    "Spin2": [
+      0.972862
+    ],
+    "Mass1": [
+      1015522.4376
+    ],
+    "Mass2": [
+      796849.1091
+    ],
+    "CoalescenceTime": [
+      4800021.15572853
+    ],
+    "PhaseAtCoalescence": [
+      4.275929308696054
+    ],
+    "InitialPolarAngleL": [
+      2.5775388853549464
+    ],
+    "InitialAzimuthalAngleL": [
+      4.094550225563854
+    ],
+    "Redshift": [
+      2.18186
+    ],
+    "Distance": [
+      17758.367941273442
+    ],
+    "ObservationDuration": [
+      31558149.763545603
+    ],
+    "Cadence": [
+      3.0
+    ],
+    "_index": 0
+  },
+  {
+    "EclipticLatitude": [
+      -1.081082148175418
+    ],
+    "EclipticLongitude": [
+      4.052962883461064
+    ],
+    "PolarAngleOfSpin1": [
+      2.354231671039206
+    ],
+    "PolarAngleOfSpin2": [
+      1.6897651680270387
+    ],
+    "Spin1": [
+      0.742128
+    ],
+    "Spin2": [
+      0.989247
+    ],
+    "Mass1": [
+      4956676.287599999
+    ],
+    "Mass2": [
+      4067166.60352
+    ],
+    "CoalescenceTime": [
+      8746488.468599081
+    ],
+    "PhaseAtCoalescence": [
+      3.783308916721985
+    ],
+    "InitialPolarAngleL": [
+      0.9635860362638292
+    ],
+    "InitialAzimuthalAngleL": [
+      3.6369245022627883
+    ],
+    "Redshift": [
+      6.17688
+    ],
+    "Distance": [
+      61097.11607589422
+    ],
+    "ObservationDuration": [
+      31558149.763545603
+    ],
+    "Cadence": [
+      3.0
+    ],
+    "_index": 1
+  },
+  {
+    "EclipticLatitude": [
+      0.6360283643790571
+    ],
+    "EclipticLongitude": [
+      0.7791590074474859
+    ],
+    "PolarAngleOfSpin1": [
+      2.3320268835068347
+    ],
+    "PolarAngleOfSpin2": [
+      2.0654433523386597
+    ],
+    "Spin1": [
+      0.574122
+    ],
+    "Spin2": [
+      0.592671
+    ],
+    "Mass1": [
+      1773562.66072
+    ],
+    "Mass2": [
+      1083355.70016
+    ],
+    "CoalescenceTime": [
+      11167843.442016248
+    ],
+    "PhaseAtCoalescence": [
+      2.311126736432254
+    ],
+    "InitialPolarAngleL": [
+      0.23280216394831457
+    ],
+    "InitialAzimuthalAngleL": [
+      3.7984106562455566
+    ],
+    "Redshift": [
+      6.03496
+    ],
+    "Distance": [
+      59472.23759169399
+    ],
+    "ObservationDuration": [
+      31558149.763545603
+    ],
+    "Cadence": [
+      3.0
+    ],
+    "_index": 2
+  },
+  {
+    "EclipticLatitude": [
+      -0.878569862072474
+    ],
+    "EclipticLongitude": [
+      4.549719557302552
+    ],
+    "PolarAngleOfSpin1": [
+      2.0686686679919486
+    ],
+    "PolarAngleOfSpin2": [
+      1.0979888817586958
+    ],
+    "Spin1": [
+      0.942824
+    ],
+    "Spin2": [
+      0.870789
+    ],
+    "Mass1": [
+      915992.6493599999
+    ],
+    "Mass2": [
+      701752.7144399999
+    ],
+    "CoalescenceTime": [
+      11258573.775200551
+    ],
+    "PhaseAtCoalescence": [
+      1.1503604245905568
+    ],
+    "InitialPolarAngleL": [
+      1.8997823859203062
+    ],
+    "InitialAzimuthalAngleL": [
+      5.829770524402561
+    ],
+    "Redshift": [
+      1.10396
+    ],
+    "Distance": [
+      7705.852640407434
+    ],
+    "ObservationDuration": [
+      31558149.763545603
+    ],
+    "Cadence": [
+      3.0
+    ],
+    "_index": 3
+  },
+  {
+    "EclipticLatitude": [
+      -0.30300442294174235
+    ],
+    "EclipticLongitude": [
+      1.2925183861048521
+    ],
+    "PolarAngleOfSpin1": [
+      1.2031361791056812
+    ],
+    "PolarAngleOfSpin2": [
+      2.097303543065685
+    ],
+    "Spin1": [
+      0.747377
+    ],
+    "Spin2": [
+      0.8388
+    ],
+    "Mass1": [
+      1323277.47932
+    ],
+    "Mass2": [
+      612485.5060299999
+    ],
+    "CoalescenceTime": [
+      11526944.921879262
+    ],
+    "PhaseAtCoalescence": [
+      1.2201968860015653
+    ],
+    "InitialPolarAngleL": [
+      2.6919824500032945
+    ],
+    "InitialAzimuthalAngleL": [
+      1.808398497592109
+    ],
+    "Redshift": [
+      1.73941
+    ],
+    "Distance": [
+      13470.983558972537
+    ],
+    "ObservationDuration": [
+      31558149.763545603
+    ],
+    "Cadence": [
+      3.0
+    ],
+    "_index": 4
+  },
+  {
+    "EclipticLatitude": [
+      0.14729601868013842
+    ],
+    "EclipticLongitude": [
+      5.986229948917219
+    ],
+    "PolarAngleOfSpin1": [
+      2.4341519104667824
+    ],
+    "PolarAngleOfSpin2": [
+      1.926612673934834
+    ],
+    "Spin1": [
+      0.745574
+    ],
+    "Spin2": [
+      0.546848
+    ],
+    "Mass1": [
+      2830218.2531
+    ],
+    "Mass2": [
+      2322253.2219
+    ],
+    "CoalescenceTime": [
+      11970964.482725449
+    ],
+    "PhaseAtCoalescence": [
+      4.111379255629408
+    ],
+    "InitialPolarAngleL": [
+      1.1312497316821077
+    ],
+    "InitialAzimuthalAngleL": [
+      4.319761023904521
+    ],
+    "Redshift": [
+      5.5077
+    ],
+    "Distance": [
+      53474.69378994925
+    ],
+    "ObservationDuration": [
+      31558149.763545603
+    ],
+    "Cadence": [
+      3.0
+    ],
+    "_index": 5
+  },
+  {
+    "EclipticLatitude": [
+      -0.9873035001010817
+    ],
+    "EclipticLongitude": [
+      3.886726441488628
+    ],
+    "PolarAngleOfSpin1": [
+      2.5943393218569093
+    ],
+    "PolarAngleOfSpin2": [
+      1.7194460407742886
+    ],
+    "Spin1": [
+      0.829141
+    ],
+    "Spin2": [
+      0.972219
+    ],
+    "Mass1": [
+      3204750.46674
+    ],
+    "Mass2": [
+      3056613.4089599997
+    ],
+    "CoalescenceTime": [
+      13617113.102185527
+    ],
+    "PhaseAtCoalescence": [
+      3.6286824771238195
+    ],
+    "InitialPolarAngleL": [
+      2.0509277192961766
+    ],
+    "InitialAzimuthalAngleL": [
+      1.0843698722336905
+    ],
+    "Redshift": [
+      2.87966
+    ],
+    "Distance": [
+      24829.1377752024
+    ],
+    "ObservationDuration": [
+      31558149.763545603
+    ],
+    "Cadence": [
+      3.0
+    ],
+    "_index": 6
+  },
+  {
+    "EclipticLatitude": [
+      0.9170307528208983
+    ],
+    "EclipticLongitude": [
+      3.5848915055548125
+    ],
+    "PolarAngleOfSpin1": [
+      1.6658498049021284
+    ],
+    "PolarAngleOfSpin2": [
+      2.092903155833516
+    ],
+    "Spin1": [
+      0.988778
+    ],
+    "Spin2": [
+      0.975945
+    ],
+    "Mass1": [
+      1856420.28713
+    ],
+    "Mass2": [
+      1801541.22385
+    ],
+    "CoalescenceTime": [
+      16532191.547870105
+    ],
+    "PhaseAtCoalescence": [
+      1.8660570584753848
+    ],
+    "InitialPolarAngleL": [
+      1.4100680944990884
+    ],
+    "InitialAzimuthalAngleL": [
+      0.5279147880519126
+    ],
+    "Redshift": [
+      4.57261
+    ],
+    "Distance": [
+      43010.925050110134
+    ],
+    "ObservationDuration": [
+      31558149.763545603
+    ],
+    "Cadence": [
+      3.0
+    ],
+    "_index": 7
+  },
+  {
+    "EclipticLatitude": [
+      0.8352504908758557
+    ],
+    "EclipticLongitude": [
+      3.257316284380882
+    ],
+    "PolarAngleOfSpin1": [
+      2.3626708510017806
+    ],
+    "PolarAngleOfSpin2": [
+      1.5398461619614254
+    ],
+    "Spin1": [
+      0.833674
+    ],
+    "Spin2": [
+      0.981901
+    ],
+    "Mass1": [
+      3983914.7712
+    ],
+    "Mass2": [
+      2049535.1205
+    ],
+    "CoalescenceTime": [
+      17245156.002278104
+    ],
+    "PhaseAtCoalescence": [
+      1.578619594274743
+    ],
+    "InitialPolarAngleL": [
+      2.3231790898746776
+    ],
+    "InitialAzimuthalAngleL": [
+      3.6432284095301353
+    ],
+    "Redshift": [
+      3.3491
+    ],
+    "Distance": [
+      29747.55159729718
+    ],
+    "ObservationDuration": [
+      31558149.763545603
+    ],
+    "Cadence": [
+      3.0
+    ],
+    "_index": 8
+  },
+  {
+    "EclipticLatitude": [
+      -0.5213686491030383
+    ],
+    "EclipticLongitude": [
+      3.085540732302169
+    ],
+    "PolarAngleOfSpin1": [
+      2.582940536787447
+    ],
+    "PolarAngleOfSpin2": [
+      2.2001561509324676
+    ],
+    "Spin1": [
+      0.825883
+    ],
+    "Spin2": [
+      0.81136
+    ],
+    "Mass1": [
+      3128823.35262
+    ],
+    "Mass2": [
+      2640345.72366
+    ],
+    "CoalescenceTime": [
+      18605758.10777253
+    ],
+    "PhaseAtCoalescence": [
+      3.4253171002359255
+    ],
+    "InitialPolarAngleL": [
+      2.6047005963930405
+    ],
+    "InitialAzimuthalAngleL": [
+      1.670015939922296
+    ],
+    "Redshift": [
+      7.21026
+    ],
+    "Distance": [
+      73048.16721769486
+    ],
+    "ObservationDuration": [
+      31558149.763545603
+    ],
+    "Cadence": [
+      3.0
+    ],
+    "_index": 9
+  },
+  {
+    "EclipticLatitude": [
+      1.2888830303312497
+    ],
+    "EclipticLongitude": [
+      2.107165416325332
+    ],
+    "PolarAngleOfSpin1": [
+      0.6247835144568568
+    ],
+    "PolarAngleOfSpin2": [
+      1.6071911517211372
+    ],
+    "Spin1": [
+      0.953675
+    ],
+    "Spin2": [
+      0.954511
+    ],
+    "Mass1": [
+      1349253.54837
+    ],
+    "Mass2": [
+      1195715.79011
+    ],
+    "CoalescenceTime": [
+      20426222.359144613
+    ],
+    "PhaseAtCoalescence": [
+      3.4351763806725844
+    ],
+    "InitialPolarAngleL": [
+      2.0646303164898057
+    ],
+    "InitialAzimuthalAngleL": [
+      4.287875156872885
+    ],
+    "Redshift": [
+      3.58897
+    ],
+    "Distance": [
+      32301.543285867734
+    ],
+    "ObservationDuration": [
+      31558149.763545603
+    ],
+    "Cadence": [
+      3.0
+    ],
+    "_index": 10
+  },
+  {
+    "EclipticLatitude": [
+      0.09483959685421084
+    ],
+    "EclipticLongitude": [
+      5.181677152158036
+    ],
+    "PolarAngleOfSpin1": [
+      2.2193830067438634
+    ],
+    "PolarAngleOfSpin2": [
+      1.2291326154191018
+    ],
+    "Spin1": [
+      0.908497
+    ],
+    "Spin2": [
+      0.691493
+    ],
+    "Mass1": [
+      1676193.8405000002
+    ],
+    "Mass2": [
+      607569.18798
+    ],
+    "CoalescenceTime": [
+      22228067.56520132
+    ],
+    "PhaseAtCoalescence": [
+      0.24919766067113341
+    ],
+    "InitialPolarAngleL": [
+      1.86726977669217
+    ],
+    "InitialAzimuthalAngleL": [
+      4.798109460211278
+    ],
+    "Redshift": [
+      4.30693
+    ],
+    "Distance": [
+      40084.679183135966
+    ],
+    "ObservationDuration": [
+      31558149.763545603
+    ],
+    "Cadence": [
+      3.0
+    ],
+    "_index": 11
+  },
+  {
+    "EclipticLatitude": [
+      -0.04413170360036589
+    ],
+    "EclipticLongitude": [
+      3.778337915324293
+    ],
+    "PolarAngleOfSpin1": [
+      2.3194296388114912
+    ],
+    "PolarAngleOfSpin2": [
+      2.3663459705632537
+    ],
+    "Spin1": [
+      0.686801
+    ],
+    "Spin2": [
+      0.89836
+    ],
+    "Mass1": [
+      3578041.9197
+    ],
+    "Mass2": [
+      1485699.85296
+    ],
+    "CoalescenceTime": [
+      23439839.137794796
+    ],
+    "PhaseAtCoalescence": [
+      5.287568991038074
+    ],
+    "InitialPolarAngleL": [
+      1.3592125432909166
+    ],
+    "InitialAzimuthalAngleL": [
+      0.08072682965922794
+    ],
+    "Redshift": [
+      7.18802
+    ],
+    "Distance": [
+      72788.91166412891
+    ],
+    "ObservationDuration": [
+      31558149.763545603
+    ],
+    "Cadence": [
+      3.0
+    ],
+    "_index": 12
+  },
+  {
+    "EclipticLatitude": [
+      -0.3170470215555752
+    ],
+    "EclipticLongitude": [
+      1.3040269883761455
+    ],
+    "PolarAngleOfSpin1": [
+      2.302153619664235
+    ],
+    "PolarAngleOfSpin2": [
+      1.3160105126865602
+    ],
+    "Spin1": [
+      0.927874
+    ],
+    "Spin2": [
+      0.963228
+    ],
+    "Mass1": [
+      1238127.30548
+    ],
+    "Mass2": [
+      1136674.33632
+    ],
+    "CoalescenceTime": [
+      24408761.955408573
+    ],
+    "PhaseAtCoalescence": [
+      5.213839964648885
+    ],
+    "InitialPolarAngleL": [
+      1.8927109788420957
+    ],
+    "InitialAzimuthalAngleL": [
+      2.667204502287152
+    ],
+    "Redshift": [
+      4.44948
+    ],
+    "Distance": [
+      41651.919868469275
+    ],
+    "ObservationDuration": [
+      31558149.763545603
+    ],
+    "Cadence": [
+      3.0
+    ],
+    "_index": 13
+  },
+  {
+    "EclipticLatitude": [
+      0.10345180508982055
+    ],
+    "EclipticLongitude": [
+      0.22438786341362668
+    ],
+    "PolarAngleOfSpin1": [
+      2.143048718867485
+    ],
+    "PolarAngleOfSpin2": [
+      1.6561317645303864
+    ],
+    "Spin1": [
+      0.875693
+    ],
+    "Spin2": [
+      0.882968
+    ],
+    "Mass1": [
+      6389298.2223000005
+    ],
+    "Mass2": [
+      3161571.0994800003
+    ],
+    "CoalescenceTime": [
+      29516089.740001738
+    ],
+    "PhaseAtCoalescence": [
+      3.654661463983301
+    ],
+    "InitialPolarAngleL": [
+      1.5768790558454235
+    ],
+    "InitialAzimuthalAngleL": [
+      1.20814467228502
+    ],
+    "Redshift": [
+      8.08487
+    ],
+    "Distance": [
+      83307.07617964421
+    ],
+    "ObservationDuration": [
+      31558149.763545603
+    ],
+    "Cadence": [
+      3.0
+    ],
+    "_index": 14
+  }
+]
