@@ -298,7 +298,7 @@ def _compute_chirp_mass(mass1, mass2):
     """Compute the binary chirp mass from component masses in solar masses."""
     mass1 = np.asarray(mass1, dtype=np.float64)
     mass2 = np.asarray(mass2, dtype=np.float64)
-    return ((mass1 * mass2) ** 3 / (mass1 + mass2) ** 2) ** (1.0 / 5.0)
+    return ((mass1 * mass2) ** 3 / (mass1 + mass2)) ** (1.0 / 5.0)
 
 
 def _distance_unit_factor_to_mpc(unit):

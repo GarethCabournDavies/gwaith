@@ -69,12 +69,36 @@ def gate_and_paint(
     # 2. Prepare for whitening operation (C^-1)
     # The whitening operator in Fourier domain is 1/PSD.
     # We handle potential infinities in the PSD (where 1/inf -> 0).
-    inv_psd_values = 1.0 / (psd.data ** 2)
+    #
+    # The FFT of a length-`num_samples` real signal has exactly
+    # ``num_samples // 2 + 1`` bins. The supplied PSD may not match that length
+    # (e.g. when the caller truncated the padded data length independently of the
+    # PSD grid), which would cause a broadcast error below. Rebuild the inverse
+    # PSD at exactly the required number of bins, interpolating from whatever
+    # frequency grid the supplied PSD uses so the shapes always agree.
+    rfft_len: int = num_samples // 2 + 1
+    psd_data: np.ndarray = np.asarray(psd.data, dtype=np.float64)
+    if len(psd_data) != rfft_len:
+        logger.warning(
+            "PSD length (%d) does not match the required FFT bin count (%d) for "
+            "%d time samples; interpolating the PSD onto a matching grid.",
+            len(psd_data), rfft_len, num_samples,
+        )
+        n_src = max(len(psd_data), 2)
+        # Source frequency axis of the supplied PSD (Hz).
+        src_freqs: np.ndarray = (np.arange(n_src) * psd.delta_f)[:len(psd_data)]
+        # Target frequency axis covering [0, Nyquist] with rfft_len bins.
+        target_freqs: npt.NDArray[np.float64] = (
+            np.linspace(0.0, sampling_rate_hz / 2.0, rfft_len)
+        )
+        psd_data = np.interp(target_freqs, src_freqs, psd_data)
+
+    inv_psd_values: npt.NDArray[np.float64] = 1.0 / (psd_data ** 2)
     inv_psd_values[~np.isfinite(inv_psd_values)] = 0.0
 
     def whiten_and_mask(input_vector: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
         """Applies the C^-1 operator and returns the result in the gaps."""
-        input_fft = np.fft.rfft(input_vector)
+        input_fft = np.fft.rfft(input_vector, n=num_samples)
         whitened_fft = input_fft * inv_psd_values
         whitened_vector = np.fft.irfft(whitened_fft, n=num_samples)
         return whitened_vector[missing_indices]

@@ -52,8 +52,9 @@ from gwaith.types import TimeSeries
 
 from hwilas import add_hwilas_common_options, add_truth_arguments, init_logging, load_truth_file
 from hwilas.psd.read import from_txt as psd_from_txt
-from hwilas.waveforms.bbhx_phenom import DEFAULT_HM_MODE_ARRAY
-from hwilas.waveforms.bbhx_utils import TIME_OFFSET_20_DEGREES
+# Higher-mode (l, m) array used by the plotting to build its higher-mode template.
+DEFAULT_HM_MODE_ARRAY = [(2, 2), (2, 1), (3, 3), (3, 2), (4, 4), (4, 3)]
+from hwilas.waveforms.constants import TIME_OFFSET_20_DEGREES
 from hwilas.waveforms import get_fd_waveform
 
 # Reuse the exact waveform-construction / normalisation helpers and event-chunk
@@ -202,7 +203,7 @@ def _make_waveform_params_shared(delta_t, delta_f, flen, f_lower, tdi_generation
         't_obs_start': 0.0,
         'delta_f': delta_f,
         'f_final': 1. / delta_t / 2 + delta_f / 2,
-        'approximant': 'BBHX_PhenomHM',
+        'approximant': 'FastBHB',
         'mode_array': DEFAULT_HM_MODE_ARRAY,
         'length': flen,
     }
@@ -399,7 +400,7 @@ def main():
             "distance": initial_template["distance"],
         })
         initial_wf_fd = get_fd_waveform(
-            "BBHX_PhenomHM",
+            "FastBHB",
             **initial_wf_params,
             ifos=args.output_timeseries_channels,
         )
@@ -444,7 +445,7 @@ def main():
             "distance": 1.0,  # normalised by distance factor below
         })
         maximised_wf_fd = get_fd_waveform(
-            "BBHX_PhenomHM",
+            "FastBHB",
             **maximised_wf_params,
             ifos=args.output_timeseries_channels,
         )

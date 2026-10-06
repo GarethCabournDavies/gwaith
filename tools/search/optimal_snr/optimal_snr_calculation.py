@@ -18,7 +18,7 @@ from hwilas.data_processing.tdi import AET, to_timeseries
 from hwilas.filter import matched_filter_frequencyseries
 from hwilas.psd.read import from_txt as psd_from_txt
 from hwilas.waveforms import get_fd_waveform
-from hwilas.waveforms.bbhx_utils import TIME_OFFSET_20_DEGREES
+from hwilas.waveforms.constants import TIME_OFFSET_20_DEGREES
 
 
 logger = logging.getLogger(__name__)
@@ -235,7 +235,7 @@ def main():
         't_obs_start': int(args.waveform_start + args.waveform_end),
         'delta_f': delta_f,
         'f_final':  1. / delta_t / 2 + delta_f / 2, # This is a hack to ensure we get the point at f_final returned
-        'approximant':'BBHX_PhenomD',
+        'approximant':'FastBHB',
         'mode_array':  [(2,2)],
         'length': flen,
         'tc': tlen

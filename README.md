@@ -20,11 +20,10 @@ Hwilas (`/ˈʍiːlas/`, `wee-lass`) is the Cornish dialect word for search or se
 
 ## Installation
 
-Hwilas has three dependencies that are installed directly from git over **SSH**
-(`gwaith`, `bbhx`, and — for the test extras — `pycbc-bbhx-plugin`). This avoids
-the common headless-system failure where pip's HTTPS `git clone` falls back to a
-missing GUI credential helper (e.g. `/usr/libexec/openssh/gnome-ssh-askpass`)
-and aborts with:
+Hwilas has two dependencies that are installed directly from git over **SSH**
+(`gwaith` and `tdispline`). This avoids the common headless-system failure where
+pip's HTTPS `git clone` falls back to a missing GUI credential helper (e.g.
+`/usr/libexec/openssh/gnome-ssh-askpass`) and aborts with:
 
 ```text
 Username for 'https://github.com':

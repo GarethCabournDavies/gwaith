@@ -14,7 +14,7 @@ hwilas_matched_filter_search \
   --channel $channel \
   --template-fraction-range $template/161 \
   --low-frequency-cutoff \
-  --waveform-type phenomx_td \
+  --waveform-type fastbhb \
   
 
   done

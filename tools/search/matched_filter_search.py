@@ -15,18 +15,12 @@ from hwilas import add_hwilas_common_options, init_logging
 from hwilas.filter import matched_filter_frequencyseries
 from hwilas.psd.read import from_txt as psd_from_txt
 from hwilas.template_banks.helpers import waveform_from_bank
-from hwilas.waveforms.bbhx_utils import TIME_OFFSET_20_DEGREES
+from hwilas.waveforms.constants import TIME_OFFSET_20_DEGREES
 from hwilas.waveforms import (
-    AET_CHANNELS,
     FASTBHB_CHANNELS,
-    LISA_CHANNELS,
     get_fd_waveform,
 )
 from hwilas.waveforms.unified_generation import generate_waveform
-
-# Channels accepted by the PhenomX time-domain generator: XYZ directly, or AET
-# via the XYZ -> AET rotation.
-PHENOMX_TD_CHANNELS = LISA_CHANNELS + AET_CHANNELS
 
 logger = logging.getLogger(__name__)
 
@@ -105,25 +99,11 @@ def main():
 
     parser.add_argument(
         '--waveform-type',
-        choices=['bbhx', 'phenomx_td', 'fastbhb'],
-        default='bbhx',
-        help="Waveform generator to use for the template bank. 'bbhx' uses the "
-             "frequency-domain BBHx approximant (default); 'phenomx_td' uses the "
-             "time-domain PhenomXPy + TDISpline generator, which returns XYZ-frame "
-             "channels (LISA_X/LISA_Y/LISA_Z) or AET; 'fastbhb' uses the LDC FastBHB "
-             "(lisabeta) time-domain generator, which returns AET channels "
+        choices=['fastbhb'],
+        default='fastbhb',
+        help="Waveform generator to use for the template bank. 'fastbhb' uses the "
+             "LDC FastBHB (lisabeta) time-domain generator, which returns AET channels "
              "(LISA_A/LISA_E/LISA_T). The TDI generation is set via --tdi-generation."
-    )
-
-    parser.add_argument(
-        '--orbit',
-        choices=['oem', 'analytic'],
-        default='analytic',
-        help="Source of the LISA orbits for the PhenomX time-domain generator. "
-             "'analytic' (default) uses an unbounded Keplerian orbit model and can "
-             "be used for data outside the OEM ephemeris domain; 'oem' uses the "
-             "bundled finite OEM ephemeris, so detector times must lie within its "
-             "domain. Ignored by the BBHx waveform type."
     )
 
     parser.add_argument("--template-fraction-range", default="0/1",
@@ -146,6 +126,13 @@ def main():
         help="File to store output peaks in SNR"
     )
 
+    parser.add_argument(
+        "--plot-snr-dir",
+        type=str,
+        default=None,
+        help="Directory to optionally save plots of the SNR timeseries for each processed template."
+    )
+
     # Parse the command-line arguments provided by the user
     args = parser.parse_args()
 
@@ -154,8 +141,7 @@ def main():
     logger.info("Starting")
 
     # First, load in the data. Get from the file the information on when it starts, its length and its delta t
-    # For now, this uses the sangria dataset, but we want to build a more sophisticated "get data" function, so that
-    # we can take in e.g. mojito datasets
+    # The input is a sangria dataset read directly from an HDF5 file.
     with h5py.File(args.input_data_file, 'r') as data_file:
         data_epoch = data_file.attrs['epoch']
         delta_t = data_file.attrs['delta_t']
@@ -216,24 +202,12 @@ def main():
 
     # Set the defaults required for the waveform parameters.
     # Use the final (possibly padded) data length so FFT sizes are consistent.
-    if args.waveform_type == 'phenomx_td':
-        approximant = 'PhenomX_TD'
-        # The PhenomX time-domain generator returns a *time-series* of ``length``
-        # samples, so its frequency resolution is 1 / (length * delta_t). That must
-        # equal the data's delta_f for matched filtering, hence length must be the
-        # number of time samples (padded_dlen), not the FFT bin count (flen).
-        wf_length = int(padded_dlen)
-    elif args.waveform_type == 'fastbhb':
-        approximant = 'FastBHB'
-        # The FastBHB time-domain generator likewise returns a *time-series* of
-        # ``length`` samples spanning [start_time, start_time + length * delta_t).
-        # Its frequency resolution must match the data's delta_f, so ``length`` is
-        # the number of time samples (padded_dlen), not the FFT bin count (flen).
-        wf_length = int(padded_dlen)
-    else:
-        approximant = 'BBHX_PhenomD'
-        # The BBHx frequency-domain generator expects the one-sided FFT length.
-        wf_length = int(flen)
+    approximant = 'FastBHB'
+    # The FastBHB time-domain generator returns a *time-series* of ``length``
+    # samples spanning [start_time, start_time + length * delta_t). Its frequency
+    # resolution must match the data's delta_f, so ``length`` is the number of time
+    # samples (padded_dlen), not the FFT bin count (flen).
+    wf_length = int(padded_dlen)
 
     waveform_params_shared = {
         'f_lower': args.f_lower,
@@ -247,31 +221,15 @@ def main():
         'approximant': approximant,
         'mode_array': [(2, 2)],
         'length': wf_length,
-        'tc': tlen,
-        # True data sampling interval (seconds). The PhenomX time-domain path uses
-        # this to build its detector-frame time grid; without it the grid would be
-        # derived from the FFT parameters and could mismatch the data.
+        'tc': tlen - 86400.0,
+        # True data sampling interval (seconds). Used to build the detector-frame
+        # time grid; without it the grid would be derived from the FFT parameters
+        # and could mismatch the data.
         'delta_t': delta_t,
     }
 
-    # The PhenomX time-domain generator accepts an `orbit` source ('oem' or
-    # 'analytic'); the BBHx path ignores it. Only forward it for the relevant
-    # waveform type to keep the parameter set clean.
-    if args.waveform_type == 'phenomx_td':
-        waveform_params_shared['orbit'] = args.orbit
-
-    # The PhenomX time-domain generator returns XYZ-frame channels (LISA_X/Y/Z),
-    # optionally rotated to AET (LISA_A/E/T); the BBHx path returns AET channels
-    # (LISA_A/E). Validate that the requested channel is compatible with the
-    # chosen waveform type before starting.
-    if args.waveform_type == 'phenomx_td' and args.channel not in PHENOMX_TD_CHANNELS:
-        raise ValueError(
-            f"Channel {args.channel} is not a PhenomX time-domain XYZ/AET channel. "
-            f"Expected one of {PHENOMX_TD_CHANNELS}."
-        )
-
     # The FastBHB time-domain generator returns AET channels (LISA_A/E/T).
-    if args.waveform_type == 'fastbhb' and args.channel not in FASTBHB_CHANNELS:
+    if args.channel not in FASTBHB_CHANNELS:
         raise ValueError(
             f"Channel {args.channel} is not a FastBHB AET channel. "
             f"Expected one of {FASTBHB_CHANNELS}."
@@ -336,8 +294,8 @@ def main():
             # Both paths handle waveform generation identically; the unified interface
             # is primarily designed for catalog-based workflows.
             # The waveform is generated in the time domain (see get_fd_waveform)
-            # so that it can be (over)whitened before the template loop. For now,
-            # convert it back to the frequency domain for matched filtering.
+            # so that it can be (over)whitened before the template loop. It is
+            # converted back to the frequency domain here for matched filtering.
             # ``get_fd_waveform`` dispatches on the approximant: BBHx returns AET
             # channels while the PhenomX time-domain path returns XYZ channels, so
             # the requested channel must match the chosen waveform type (validated
@@ -346,9 +304,22 @@ def main():
                 ifos=[args.channel], **bank_wf_params
             )
 
+            # The waveform is generated with tc shifted earlier (by 1 day) to
+            # prevent the lisabeta boundary crash. A frequency-domain phase shift
+            # rolls the merger time back to the end of the data (tlen), so the SNR
+            # timeseries peak times are correct.
+            wf_fs = waveform[args.channel].to_frequencyseries()
+            freqs = np.asarray(wf_fs.sample_frequencies)
+            
+            # Shifting the template backwards in time by dt corresponds to
+            # multiplying by exp(+2j * pi * f * dt) in frequency domain for our convention,
+            # but we want to shift the effective merger *forward* by 86400s (so it occurs later).
+            # A forward shift of the template by dt means h(t - dt), which in FD is exp(-2j*pi*f*dt).
+            wf_fs.data *= np.exp(-2j * np.pi * freqs * 86400.0)
+
             logger.debug('Computing SNR')
             snr_ts = matched_filter_frequencyseries(
-                waveform[args.channel].to_frequencyseries(),
+                wf_fs,
                 data_fs,
                 psd=psd,
                 n_samples=len(data),
@@ -390,6 +361,38 @@ def main():
                 # no rows to the output. Record it so the summary below can name it.
                 skipped_templates.append(template_idx)
 
+            if args.plot_snr_dir is not None:
+                import os
+                from matplotlib import use
+                use('Agg')
+                from matplotlib import pyplot as plt
+                
+                os.makedirs(args.plot_snr_dir, exist_ok=True)
+                fig, ax = plt.subplots(figsize=(14, 5))
+                ax.plot(snr_times / 86400.0, abs(snr_data))
+                if len(times_out) > 0:
+                    ax.scatter(
+                        times_out / 86400.0,
+                        snrs_out,
+                        c='y',
+                        marker='*',
+                        zorder=50,
+                    )
+                if args.snr_threshold is not None:
+                    ax.axhline(args.snr_threshold, color='r', linestyle='--', label=f'Threshold ({args.snr_threshold})')
+                    ax.legend()
+                    
+                ax.set_xlabel('Time (days)')
+                ax.set_ylabel('SNR')
+                ax.set_title(f"Template {template_idx} ({args.channel})")
+
+                output_path = os.path.join(
+                    args.plot_snr_dir,
+                    f"snr_timeseries_{args.channel}_{template_idx}.png",
+                )
+                fig.savefig(output_path, bbox_inches='tight')
+                plt.close(fig)
+                logger.info("Saved SNR plot to %s", output_path)
 
             output_triggers['template_id'] += [template_idx] * len(clustered_indices)
             output_triggers['end_time'] += times_out.tolist()
