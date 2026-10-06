@@ -16,8 +16,10 @@ from hwilas import add_hwilas_common_options, init_logging
 from hwilas.conversions import mchirp_eta_from_mass1_mass2, mass1_mass2_from_mchirp_eta
 from hwilas.filter import matched_filter_frequencyseries, sigmasq_frequencyseries
 from hwilas.psd.read import from_txt as psd_from_txt
-from hwilas.waveforms.bbhx_utils import TIME_OFFSET_20_DEGREES
-from hwilas.waveforms.bbhx_phenom import DEFAULT_HM_MODE_ARRAY
+from hwilas.waveforms.constants import TIME_OFFSET_20_DEGREES
+# Higher-mode (l, m) array used by the follow-up optimisation to build its
+# higher-mode template.
+DEFAULT_HM_MODE_ARRAY = [(2, 2), (2, 1), (3, 3), (3, 2), (4, 4), (4, 3)]
 from hwilas.types import KeyValueAction
 from hwilas.waveforms import get_fd_waveform
 from hwilas.template_banks.helpers import waveform_from_bank
@@ -74,8 +76,7 @@ def build_aligned_waveform(v, data, waveform_params_shared, raise_err=False, wav
             raise
         return None
 
-    # The time alignment is now handled by setting `tc` directly in the
-    # waveform generator, so no explicit time shift is needed.
+    # The waveform generator sets `tc` directly, so no explicit time shift is applied.
     return wf
 
 
@@ -823,7 +824,7 @@ def main():
             't_obs_start': tlen,
             'delta_f': delta_f,
             'f_final': 1. / delta_t / 2 + delta_f / 2, # This is a hack to ensure we get the point at f_final returned
-            'approximant':'BBHX_PhenomHM',
+            'approximant':'FastBHB',
             'mode_array':  DEFAULT_HM_MODE_ARRAY,
             'length': flen,
             'tc': tlen

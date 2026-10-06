@@ -6,9 +6,13 @@ set -e
 # bank for this initial test.
 #
 # Pipeline:
-#   Step 1: Load + downsample the full Mojito dataset to AET channels (once).
-#   Step 2 (per chunk): Split to the analysis window, pad and inpaint using the
-#           mojito PSD, then run matched filtering over LISA_A / LISA_E.
+#   Step 1 (per chunk): Downsample the raw Mojito data to AET channels for that
+#           chunk's time window.
+#   Step 2 (once): Estimate the smoothed mojito PSD by pooling all downsampled
+#           chunks together, so the Welch estimate uses far more independent
+#           segments than a single-chunk estimate.
+#   Step 3 (per chunk): Pad and inpaint using that PSD, then run matched
+#           filtering over LISA_A / LISA_E.
 
 RUN_MODE="slurm" # Options: "slurm" or "bash"
 
@@ -22,7 +26,6 @@ template_parallelization=15
 
 # Mojito dataset (731 days of light data at 4 s cadence after downsampling).
 mojito_data_file="/path/to/data.h5"
-mojito_aet_file="${OUTPUT_DIR}/round_0/data_processing/mojito_data_aet.hdf"
 mojito_catalogue_file="/path/to/catalogue.hdf5"
 
 
@@ -39,9 +42,15 @@ tdi_generation="2"
 # Template bank: for this initial test we reuse the SANGRIA bank.
 bank_file="../template_banks/output/sangria_bank.hdf"
 
-# Mojito smoothed PSD files, one per AET channel.
-psd_file_a="../psd_estimation/output/A_mojito_SMOOTHED_PSD.txt"
-psd_file_e="../psd_estimation/output/E_mojito_SMOOTHED_PSD.txt"
+# Mojito smoothed PSD files, one per AET channel. These are estimated in Step 2
+# by pooling all downsampled chunks together (hwilas_estimate_mojito_psd).
+psd_dir="${OUTPUT_DIR}/round_0/psd"
+psd_file_a="${psd_dir}/A_mojito_SMOOTHED_PSD.txt"
+psd_file_e="${psd_dir}/E_mojito_SMOOTHED_PSD.txt"
+
+# Welch segment duration for the PSD estimate (seconds). Default 18.25 days,
+# so each ~4-month chunk contributes several independent segments.
+psd_segment_duration=1576800
 
 current_analysis_start_time=0
 chunk_idx=0
@@ -94,6 +103,85 @@ handle_matched_filter_jobs() {
     fi
 }
 
+# =============================================================================
+# Step 1 (per chunk): Downsample the raw Mojito data to AET channels.
+# One downsampled HDF5 per chunk; all of them are pooled together in Step 2
+# for a smoother PSD estimate.
+# =============================================================================
+mkdir -p "${OUTPUT_DIR}/round_0/data_processing"
+downsampled_files=()
+
+while [ $current_analysis_start_time -lt $total_data_duration ]; do
+    current_analysis_end_time=$((current_analysis_start_time + chunk_duration))
+    if [ $current_analysis_end_time -gt $total_data_duration ]; then
+        current_analysis_end_time=$total_data_duration
+    fi
+
+    downsampled_file="${OUTPUT_DIR}/round_0/data_processing/mojito_downsampled_chunk${chunk_idx}.hdf"
+    echo "=========================================================="
+    echo "1. Downsampling Chunk ${chunk_idx}: [${current_analysis_start_time}, ${current_analysis_end_time})"
+    echo "=========================================================="
+
+    hwilas_process_mojito_data_chunk \
+        --data-file "${mojito_data_file}" \
+        --output-file "${downsampled_file}" \
+        --low-cutoff-frequency 1e-5 \
+        --channels LISA_A LISA_E LISA_T \
+        --delta-t 4 \
+        --analysis-start-time "${current_analysis_start_time}" \
+        --analysis-end-time "${current_analysis_end_time}" \
+        --verbose
+
+    downsampled_files+=("${downsampled_file}")
+
+    current_analysis_start_time=$current_analysis_end_time
+    chunk_idx=$((chunk_idx + 1))
+done
+
+# =============================================================================
+# Step 1b (once): Recombine all downsampled chunks into a single contiguous
+# file. The per-chunk files are concatenated in order, so the result is one
+# continuous AET time series spanning the whole dataset. This recombined file
+# is used by the downstream truth-extraction / plotting steps.
+# =============================================================================
+recombined_file="${OUTPUT_DIR}/round_0/data_processing/mojito_downsampled.hdf"
+echo "=========================================================="
+echo "1b. Recombining ${#downsampled_files[@]} downsampled chunks into ${recombined_file}"
+echo "=========================================================="
+
+hwilas_process_mojito_data_recombine \
+    --data-file "${downsampled_files[@]}" \
+    --output-file "${recombined_file}" \
+    --verbose
+
+# =============================================================================
+# Step 2 (once): Estimate the smoothed mojito PSD by pooling all downsampled
+# chunks together. Each channel is concatenated across chunks before Welch's
+# method is applied, so the estimate uses far more independent segments than a
+# single-chunk estimate and is much smoother.
+# =============================================================================
+echo "=========================================================="
+echo "2. Estimating mojito PSD from all ${#downsampled_files[@]} downsampled chunks"
+echo "=========================================================="
+
+hwilas_estimate_mojito_psd \
+    --data-file "${downsampled_files[@]}" \
+    --output-file \
+        LISA_A:"${psd_file_a}" \
+        LISA_E:"${psd_file_e}" \
+        LISA_T:"${psd_dir}/T_mojito_SMOOTHED_PSD.txt" \
+    --segment-duration "${psd_segment_duration}" \
+    --smooth-regions 0.03,0.09 \
+    --testing-plots "${psd_dir}" \
+    --verbose
+
+# =============================================================================
+# Step 3 (per chunk): Pad + inpaint using the combined PSD, then run matched
+# filtering over LISA_A / LISA_E.
+# =============================================================================
+current_analysis_start_time=0
+chunk_idx=0
+
 # Step 1: Extract the injected-signal ("truth") catalog once, up front, so it
 # can be overlaid on the plotting steps below (coincidence, subtracted signals).
 echo "Extracting truth data..."
@@ -105,56 +193,71 @@ hwilas_extract_truth \
   --verbose \
   --type mojito
 
+while [ $current_analysis_start_time -lt $total_data_duration ]; do
+    current_analysis_end_time=$((current_analysis_start_time + chunk_duration))
+    if [ $current_analysis_end_time -gt $total_data_duration ]; then
+        current_analysis_end_time=$total_data_duration
+    fi
 
+    # Per-chunk output directory for this round of the search.
+    chunk_output_dir="${OUTPUT_DIR}/round_0/chunk_${chunk_idx}"
+    mkdir -p "${chunk_output_dir}/data_processing"
+    mkdir -p "${chunk_output_dir}/matched_filter"
+    mkdir -p "${chunk_output_dir}/logs"
 
-while (( $(echo "$current_analysis_start_time < $total_data_duration" | bc -l) )); do
-  analysis_end_time=$(echo "$current_analysis_start_time + $chunk_duration" | bc -l)
-  # Ensure the last chunk doesn't go beyond the total data duration
-  if (( $(echo "$analysis_end_time > $total_data_duration" | bc -l) )); then
-    analysis_end_time=$total_data_duration
-  fi
+    # Reuse the downsampled file produced in Step 1 for this chunk.
+    downsampled_file="${OUTPUT_DIR}/round_0/data_processing/mojito_downsampled_chunk${chunk_idx}.hdf"
+    padded_file="${chunk_output_dir}/data_processing/mojito_padded_chunk${chunk_idx}.hdf"
 
-  echo "--- Processing Chunk ${chunk_idx} (Analysis Window: ${current_analysis_start_time}s to ${analysis_end_time}s) ---"
+    # Pad + inpaint the downsampled chunk using the combined mojito PSD.
+    echo "Running hwilas_split_pad_data for chunk ${chunk_idx}"
+    hwilas_split_pad_data \
+        --data-file "${downsampled_file}" \
+        --output-file "${padded_file}" \
+        --psd-file "${psd_file_a}" \
+        --channels LISA_A LISA_E \
+        --padding-duration "${padding_for_process_data}" \
+        --analysis-start-time "${current_analysis_start_time}" \
+        --analysis-end-time "${current_analysis_end_time}" \
+        --verbose
 
-  chunk_output_dir="${OUTPUT_DIR}/round_0/chunk_${chunk_idx}"
-  mkdir -p "${chunk_output_dir}/data_processing"
-  mkdir -p "${chunk_output_dir}/matched_filter"
-  mkdir -p "${chunk_output_dir}/logs"
+    # Plot the padded + inpainted data (and whitened / overwhitened diagnostics)
+    # for a quick visual sanity check.
+    hwilas_plot_split_pad_data \
+        --verbose \
+        --data-file "${padded_file}" \
+        --psd-file "${psd_file_a}" \
+        --channels LISA_A LISA_E \
+        --analysis-start-time "${current_analysis_start_time}" \
+        --analysis-end-time "${current_analysis_end_time}" \
+        --truth-file "${OUTPUT_DIR}/round_0/truth.hdf" \
+        --output-file "${chunk_output_dir}/data_processing/plot_split_pad_data.png"
 
-  # Step 2: Split to analysis window, pad, and inpaint using the mojito PSD.
-  echo "Running hwilas_process_and_pad_mojito_chunk for chunk ${chunk_idx}"
-  hwilas_process_and_pad_mojito_chunk \
-    --data-file "${mojito_data_file}" \
-    --output-file "${chunk_output_dir}/data_processing/mojito_padded_chunk${chunk_idx}.hdf" \
-    --psd-file "${psd_file_a}" \
-    --channels LISA_A LISA_E LISA_T \
-    --delta-t 4 \
-    --padding-duration "${padding_for_process_data}" \
-    --analysis-start-time "${current_analysis_start_time}" \
-    --analysis-end-time "${analysis_end_time}" \
-    --verbose
+    # Submit matched filter jobs for this chunk, one job array per channel.
+    for channel in "LISA_A" "LISA_E"; do
+        if [ "${channel}" == "LISA_A" ]; then
+            psd_file="${psd_file_a}"
+        else
+            psd_file="${psd_file_e}"
+        fi
 
-  # Plot the padded + inpainted data (and whitened / overwhitened diagnostics)
-  # for a quick visual sanity check.
-  hwilas_plot_split_pad_data \
-    --verbose \
-    --data-file "${chunk_output_dir}/data_processing/mojito_padded_chunk${chunk_idx}.hdf" \
-    --psd-file "${psd_file_a}" \
-    --channels LISA_A LISA_E \
-    --analysis-start-time "${current_analysis_start_time}" \
-    --analysis-end-time "${analysis_end_time}" \
-    --truth-file "${OUTPUT_DIR}/round_0/truth.hdf" \
-    --output-file "${chunk_output_dir}/data_processing/plot_split_pad_data.png"
+        echo "=========================================================="
+        echo "4. Submitting Matched Filter jobs for Channel ${channel} (Chunk ${chunk_idx})"
+        echo "=========================================================="
 
-  # handle_matched_filter_jobs "${chunk_output_dir}" "LISA_A" "${chunk_idx}" "${template_parallelization}"
-  # handle_matched_filter_jobs "${chunk_output_dir}" "LISA_E" "${chunk_idx}" "${template_parallelization}"
+        if [ "${RUN_MODE}" == "slurm" ]; then
+            job_id=$(handle_matched_filter_jobs "${chunk_output_dir}" "${channel}" "${chunk_idx}" "${template_parallelization}")
+            matched_filter_job_ids+=("${job_id}")
+        else
+            handle_matched_filter_jobs_bash "${chunk_output_dir}" "${channel}" "${chunk_idx}" "${template_parallelization}"
+        fi
+    done
 
-  # Update for next chunk
-  current_analysis_start_time=$(echo "$current_analysis_start_time + $chunk_duration" | bc -l)
-  chunk_idx=$((chunk_idx + 1))
+    # Update for next chunk
+    current_analysis_start_time=$current_analysis_end_time
+    chunk_idx=$((chunk_idx + 1))
 done
 
-exit
 
 if [ "$RUN_MODE" == "slurm" ]; then
   if [ ${#matched_filter_job_ids[@]} -eq 0 ]; then

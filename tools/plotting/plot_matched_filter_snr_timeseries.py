@@ -33,7 +33,7 @@ from hwilas import add_hwilas_common_options, init_logging
 from hwilas.filter import matched_filter_frequencyseries
 from hwilas.psd.read import from_txt as psd_from_txt
 from hwilas.template_banks.helpers import waveform_from_bank
-from hwilas.waveforms.bbhx_utils import TIME_OFFSET_20_DEGREES
+from hwilas.waveforms.constants import TIME_OFFSET_20_DEGREES
 from hwilas.waveforms import (
     AET_CHANNELS,
     FASTBHB_CHANNELS,
@@ -114,9 +114,9 @@ def load_arguments():
     )
     parser.add_argument(
         "--waveform-type",
-        choices=['bbhx', 'phenomx_td', 'fastbhb'],
-        default='bbhx',
-        help="Waveform generator to use (default: bbhx)"
+        choices=['fastbhb'],
+        default='fastbhb',
+        help="Waveform generator to use (default: fastbhb)"
     )
     parser.add_argument(
         "--tdi-generation",
@@ -173,15 +173,12 @@ def main():
     delta_f = 1.0 / tlen
     flen = len(data) // 2 + 1
 
-    if args.waveform_type == 'phenomx_td':
-        approximant = 'PhenomX_TD'
-        wf_length = int(padded_dlen)
-    elif args.waveform_type == 'fastbhb':
-        approximant = 'FastBHB'
-        wf_length = int(padded_dlen)
-    else:
-        approximant = 'BBHX_PhenomD'
-        wf_length = int(flen)
+    approximant = 'FastBHB'
+    # The FastBHB time-domain generator returns a *time-series* of ``length``
+    # samples, so its frequency resolution is 1 / (length * delta_t), which must
+    # equal the data's delta_f. Hence length is the number of time samples
+    # (padded_dlen), not the FFT bin count.
+    wf_length = int(padded_dlen)
 
     waveform_params_shared = {
         'f_lower': args.f_lower,

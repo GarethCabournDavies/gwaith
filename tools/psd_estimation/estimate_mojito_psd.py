@@ -1,4 +1,10 @@
-"""Estimate the PSD from processed mojito data."""
+"""Estimate the PSD from processed mojito data.
+
+Accepts one or more chunked-data HDF5 files. When multiple files are given,
+each channel is concatenated across all chunks before Welch's method is
+applied, so the estimate pools segments from every chunk and is far smoother
+than a single-chunk estimate.
+"""
 
 import argparse
 import logging
@@ -22,7 +28,12 @@ def load_arguments():
     parser.add_argument(
         "--data-file",
         required=True,
-        help="Path to the processed mojito HDF5 file (output of hwilas_process_mojito_data)."
+        nargs="+",
+        help="Path(s) to the processed mojito HDF5 file(s) (output of "
+             "hwilas_process_mojito_data). When multiple files are given, all "
+             "chunks are concatenated per channel before Welch's method is "
+             "applied, so the PSD estimate uses far more independent segments "
+             "and is much smoother than estimating from a single chunk."
     )
     parser.add_argument(
         "--output-file",
@@ -55,38 +66,60 @@ def main():
     channels = list(args.output_file.keys())
     logger.debug("Channels: %s", channels)
 
-    logger.info("Loading processed mojito data from %s", args.data_file)
-    with h5py.File(args.data_file, 'r') as f:
-        epoch = float(f.attrs.get("epoch", 0.0))
-        delta_t = float(f.attrs.get("delta_t", 1.0))
-        laser_frequency = f.attrs.get("laser_frequency", None)
+    # Load every data file, concatenating each channel across files so that the
+    # Welch estimate pools segments from all chunks. Files must share the same
+    # delta_t and provide every requested channel.
+    timeseries = {}
+    data_files = args.data_file
+    for i, data_file in enumerate(data_files):
+        logger.info("Loading processed mojito data %d/%d: %s",
+                    i + 1, len(data_files), data_file)
+        with h5py.File(data_file, 'r') as f:
+            epoch = float(f.attrs.get("epoch", 0.0))
+            delta_t = float(f.attrs.get("delta_t", 1.0))
 
-        # Load requested channels from HDF5
-        timeseries = {}
-        for channel in channels:
-            if channel not in f:
-                raise ValueError(
-                    f"Channel {channel} not found in {args.data_file}. "
-                    f"Available: {list(f.keys())}"
+            for channel in channels:
+                if channel not in f:
+                    raise ValueError(
+                        f"Channel {channel} not found in {data_file}. "
+                        f"Available: {list(f.keys())}"
+                    )
+                data_array = np.asarray(f[channel][:], dtype=float)
+                if channel in timeseries:
+                    # All chunks must share the same sampling rate.
+                    existing_dt = timeseries[channel].delta_t
+                    if existing_dt != delta_t:
+                        raise ValueError(
+                            f"delta_t in {data_file} ({delta_t}) does not match "
+                            f"the first file ({existing_dt}). All chunks must "
+                            "share the same sampling rate."
+                        )
+                    timeseries[channel] = TimeSeries(
+                        np.concatenate([timeseries[channel].data, data_array]),
+                        delta_t=delta_t,
+                        epoch=epoch,
+                    )
+                else:
+                    timeseries[channel] = TimeSeries(
+                        data_array,
+                        delta_t=delta_t,
+                        epoch=epoch,
+                    )
+                logger.debug(
+                    "Loaded %s from %s: %d samples (total so far: %d), "
+                    "delta_t=%.6f, epoch=%.2f",
+                    channel, data_file, len(data_array),
+                    len(timeseries[channel]), delta_t, epoch,
                 )
-            data_array = np.asarray(f[channel][:], dtype=float)
-            timeseries[channel] = TimeSeries(
-                data_array,
-                delta_t=delta_t,
-                epoch=epoch
-            )
-            logger.debug(
-                "Loaded %s: %d samples, delta_t=%.6f, epoch=%.2f",
-                channel,
-                len(data_array),
-                delta_t,
-                epoch
-            )
 
     tlen = len(timeseries[channels[0]])
+    delta_t = timeseries[channels[0]].delta_t
     delta_f = 1.0 / (tlen * delta_t)
 
-    logger.info("Calculating PSDs")
+    logger.info(
+        "Estimating PSDs from %d file(s), total duration per channel: %.3g s",
+        len(data_files), tlen * delta_t,
+    )
     full_psds = {}
     for channel in channels:
         logger.debug("Calculating PSD for %s", channel)
@@ -108,9 +141,13 @@ def main():
         )
 
     logger.info("Saving PSDs")
+    import os
     for channel in channels:
         output_path = args.output_file[channel]
         logger.debug("Saving PSD for %s to %s", channel, output_path)
+        out_dir = os.path.dirname(output_path)
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
         psds[channel].save(output_path)
 
     if args.testing_plots:
@@ -133,9 +170,12 @@ def main():
             plt.close(fig)
 
             fig, ax = plt.subplots()
-            ax.loglog(psds[channel].f_array, np.sqrt(psds[channel].data))
+            ax.loglog(
+                psds[channel].sample_frequencies,
+                np.sqrt(psds[channel].data)
+            )
             ax.set_xlabel('Frequency (Hz)')
-            ax.set_ylabel(f'Strain/{np.sqrt("Hz")}')
+            ax.set_ylabel('Strain (Hz^{-1/2})')
             ax.set_title(f'Interpolated PSD: {channel}')
             fig.savefig(os.path.join(args.testing_plots, f'{channel}_interp_psd.png'))
             plt.close(fig)

@@ -4,9 +4,8 @@ This tool loads a standardised truth HDF5 file (as produced by
 ``hwilas_extract_truth``) and, for each injected massive binary black hole
 (MBHB) signal in the catalog:
 
-* regenerates the detector-frame waveform with a selectable generator
-  (:func:`hwilas.waveforms.get_fd_waveform`; PhenomXPy + TDISpline by default, or
-  LDC FastBHB via ``--waveform FastBHB``), and
+* regenerates the detector-frame waveform with the LDC FastBHB (lisabeta)
+  generator (:func:`hwilas.waveforms.get_fd_waveform`), and
 * compares it against the noisy data stream (``obs/tdi``) and the noiseless injected
   signal from the truth file.
 
@@ -130,7 +129,7 @@ def generate_signal_waveform(
     detector_times,
     orbit="analytic",
     waveform_span_days=None,
-    waveform="PhenomXTD",
+    waveform="FastBHB",
     tdi_generation="1.5",
 ):
     """Regenerate the AET-channel waveform for a single catalog signal.
@@ -143,16 +142,16 @@ def generate_signal_waveform(
     detector_times : array_like
         The full data time grid; returned waveforms are aligned to it.
     orbit : {'analytic', 'oem'}
-        Forwarded to the PhenomX generator. ``"analytic"`` is required when the data
-        grid (e.g. a training file starting at t=0) lies outside the OEM domain.
-        Ignored by the FastBHB and BBHx generators.
+        Orbit source forwarded to the generator. ``"analytic"`` is required when the
+        data grid (e.g. a training file starting at t=0) lies outside the OEM domain.
+        Ignored by the FastBHB generator.
     waveform_span_days : float or None
         If given, only generate the waveform over this many days centred on the
         signal's coalescence time and zero-fill the rest of ``detector_times``. This
         keeps memory/CPU bounded for multi-year grids where an MBHB chirp occupies a
         short window; if ``None``, generate over the entire ``detector_times`` grid.
     waveform : str
-        Approximant name: 'PhenomXTD' (default), 'FastBHB', or 'BBHX_PhenomD' / 'BBHX_PhenomHM'.
+        Approximant name: 'FastBHB' (default).
     """
     tc = signal["tc"]
     t_min = float(detector_times[0])
@@ -269,9 +268,9 @@ def build_parser():
     )
     parser.add_argument(
         "--waveform",
-        default="PhenomX_TD",
+        default="FastBHB",
         help=(
-            "Waveform generator to use for regeneration (default: PhenomX_TD)."
+            "Waveform generator to use for regeneration (default: FastBHB)."
         ),
     )
     parser.add_argument(

@@ -38,9 +38,9 @@ handle_matched_filter_jobs() {
     template_script_path=$(readlink -f "$(dirname "$0")/matched_filter_template.sh")
     local template_parallelization_minus_1=$((template_parallelization - 1))
 
-    # Sangria uses the PhenomX time-domain generator with default TDI generation,
+    # Sangria uses the LDC FastBHB time-domain generator with default TDI generation,
     # and its own bank / PSD / padded-data paths.
-    local waveform_type="phenomx_td"
+    local waveform_type="fastbhb"
     local tdi_generation="1.5"
     local bank_file="../template_banks/output/sangria_bank.hdf"
     local psd_file_a="../psd_estimation/output/A_sangria_hm_SMOOTHED_PSD.txt"

@@ -1,26 +1,18 @@
 """
 Unified waveform generation interface for GW search and analysis.
 
-Provides a single coherent function for generating waveforms that handles:
-- Time-domain generators (PhenomX, FastBHB)
-- Frequency-domain generators (BBHx)
-- Automatic frame conversion (XYZ ↔ AET)
-- Optional channel filtering
-- Consistent parameter handling across all approximants
+Provides a single coherent function for generating waveforms using the LDC
+FastBHB (lisabeta) time-domain generator, with automatic frame conversion
+(XYZ -> AET when needed), optional channel filtering, and consistent parameter
+handling. The legacy BBHx and PhenomXPy generators have been removed from the
+project; FastBHB is the only supported path.
 """
 
 import numpy as np
 
-from hwilas.waveforms import get_fd_waveform, AET_CHANNELS, FASTBHB_CHANNELS, LISA_CHANNELS
-from hwilas.waveforms.bbhx_utils import TIME_OFFSET_20_DEGREES
+from hwilas.waveforms import get_fd_waveform, AET_CHANNELS, FASTBHB_CHANNELS
+from hwilas.waveforms.constants import TIME_OFFSET_20_DEGREES
 from hwilas.data_processing.tdi import linear_AET_conversion
-
-
-# Time-domain generators that take detector_times
-TIME_DOMAIN_DETECTORS = {'phenomx_td', 'fastbhb'}
-
-# Frequency-domain generators that need FD grid parameters
-FREQUENCY_DOMAIN_GENERATORS = {'bbhx_phenomd', 'bbhx_phenomhm'}
 
 
 def generate_waveform(
@@ -37,12 +29,11 @@ def generate_waveform(
     padding_fill=0.0,
 ):
     """
-    Generate a waveform with unified interface across all approximants.
+    Generate a waveform with the unified interface.
 
-    This function handles the complexity of different waveform generators:
-    - Time-domain generators (PhenomX_TD, FastBHB) work with detector_times
-    - Frequency-domain generators (BBHx) work with delta_f / length
-    - Output frame conversion is automatic (XYZ ↔ AET)
+    The only supported generator is LDC FastBHB (lisabeta), which works in the
+    time domain: provide ``detector_times`` (or both ``delta_t`` and
+    ``delta_f``). Output frame conversion is automatic (XYZ ↔ AET).
 
     Parameters
     ----------
@@ -57,11 +48,8 @@ def generate_waveform(
         - tc (required, coalescence time in seconds)
         - spin1_polar_angle, spin2_polar_angle (optional, in rad; default 0.0)
     approximant : str
-        Waveform approximant. One of:
-        - 'PhenomX_TD': PhenomXPy time-domain with TDI
-        - 'FastBHB': LDC FastBHB (lisabeta-backed) time-domain
-        - 'BBHX_PhenomD': BBHx frequency-domain (spin-aligned)
-        - 'BBHX_PhenomHM': BBHx frequency-domain (higher modes)
+        Waveform approximant. Only 'FastBHB' (LDC FastBHB, lisabeta-backed,
+        time-domain) is supported.
     detector_times : array_like, optional
         Time grid for output (required for time-domain generators).
         For frequency-domain, provide either this or both delta_t and delta_f.
@@ -75,7 +63,7 @@ def generate_waveform(
     tdi_generation : str, default '1.5'
         TDI generation version ('1.5' or '2.0').
     orbit : str, default 'analytic'
-        Orbit source ('analytic' or 'oem'). Ignored for BBHx generators.
+        Orbit source ('analytic' or 'oem'). Ignored by the FastBHB generator.
     t_offset : float, default TIME_OFFSET_20_DEGREES
         Time offset for SSB frame conversion (seconds).
     padding_fill : float, default 0.0
@@ -95,19 +83,9 @@ def generate_waveform(
         If approximant is unknown, required parameters are missing, or channel
         specifications are incompatible with the chosen approximant.
     """
-    approximant = str(approximant).lower()
-
-    # Validate and normalize approximant name
-    if approximant == 'phenomx_td':
-        wf_type = 'phenomx_td'
-    elif approximant == 'fastbhb':
-        wf_type = 'fastbhb'
-    elif approximant.startswith('bbhx'):
-        wf_type = 'bbhx'
-    else:
+    if str(approximant).lower() != 'fastbhb':
         raise ValueError(
-            f"Unknown approximant '{approximant}'. "
-            f"Expected one of: PhenomX_TD, FastBHB, BBHX_PhenomD, BBHX_PhenomHM"
+            f"Unknown approximant '{approximant}'. Only 'FastBHB' is supported."
         )
 
     # Extract parameters and apply defaults
@@ -148,94 +126,41 @@ def generate_waveform(
         tdi=tdi_generation,
     )
 
-    # Time-domain generators (PhenomX_TD, FastBHB)
-    if wf_type in TIME_DOMAIN_DETECTORS:
-        if detector_times is None:
-            raise ValueError(
-                f"Approximant '{approximant}' requires 'detector_times' grid"
-            )
+    # FastBHB time-domain generator
+    if detector_times is None:
+        raise ValueError("Approximant 'FastBHB' requires a 'detector_times' grid")
 
-        detector_times = np.asarray(detector_times, dtype=float).ravel()
-        if len(detector_times) < 2:
-            raise ValueError("detector_times must have at least 2 samples")
+    detector_times = np.asarray(detector_times, dtype=float).ravel()
+    if len(detector_times) < 2:
+        raise ValueError("detector_times must have at least 2 samples")
 
-        if delta_t is None:
-            delta_t = float(detector_times[1] - detector_times[0])
+    if delta_t is None:
+        delta_t = float(detector_times[1] - detector_times[0])
 
-        if wf_type == 'fastbhb':
-            generated = get_fd_waveform(
-                'FastBHB',
-                start_time=float(detector_times[0]),
-                end_time=float(detector_times[-1]),
-                delta_t=delta_t,
-                **common_params,
-            )
-        else:  # phenomx_td
-            generated = get_fd_waveform(
-                'PhenomX_TD',
-                detector_times=detector_times,
-                orbit=orbit,
-                **common_params,
-            )
+    generated = get_fd_waveform(
+        'FastBHB',
+        start_time=float(detector_times[0]),
+        end_time=float(detector_times[-1]),
+        delta_t=delta_t,
+        **common_params,
+    )
 
-        # Convert to AET if needed
-        if all(ch in generated for ch in AET_CHANNELS):
-            data = {
-                ch: np.asarray(generated[ch].data, dtype=float)
-                for ch in AET_CHANNELS
-            }
-        elif all(ch in generated for ch in ['LISA_X', 'LISA_Y', 'LISA_Z']):
-            X = np.asarray(generated['LISA_X'].data, dtype=float)
-            Y = np.asarray(generated['LISA_Y'].data, dtype=float)
-            Z = np.asarray(generated['LISA_Z'].data, dtype=float)
-            data = linear_AET_conversion(X, Y, Z)
-        else:
-            raise ValueError(
-                "Generated waveform did not expose known channel sets. "
-                "Expected either AET or XYZ channels."
-            )
-
-    # Frequency-domain generators (BBHx)
-    else:  # wf_type == 'bbhx'
-        if detector_times is not None:
-            detector_times = np.asarray(detector_times, dtype=float).ravel()
-            n_samples = len(detector_times)
-            freq_domain_length = n_samples // 2 + 1
-            if delta_t is None:
-                if len(detector_times) < 2:
-                    raise ValueError("detector_times must have at least 2 samples")
-                delta_t = float(detector_times[1] - detector_times[0])
-            if delta_f is None:
-                delta_f = 1.0 / (n_samples * delta_t)
-            t_obs_start = n_samples * delta_t
-        else:
-            if delta_f is None or delta_t is None:
-                raise ValueError(
-                    "Frequency-domain generators require either 'detector_times' "
-                    "or both 'delta_f' and 'delta_t'"
-                )
-            delta_f = float(delta_f)
-            delta_t = float(delta_t)
-            n_samples = int(1.0 / (delta_f * delta_t))
-            freq_domain_length = n_samples // 2 + 1
-            t_obs_start = n_samples * delta_t
-            detector_times = None
-
-        generated = get_fd_waveform(
-            approximant,
-            delta_f=delta_f,
-            length=freq_domain_length,
-            t_obs_start=t_obs_start,
-            t_offset=t_offset,
-            **common_params,
-        )
-
-        # BBHx returns AET channels
+    # Convert to AET if needed
+    if all(ch in generated for ch in AET_CHANNELS):
         data = {
             ch: np.asarray(generated[ch].data, dtype=float)
             for ch in AET_CHANNELS
-            if ch in generated
         }
+    elif all(ch in generated for ch in ['LISA_X', 'LISA_Y', 'LISA_Z']):
+        X = np.asarray(generated['LISA_X'].data, dtype=float)
+        Y = np.asarray(generated['LISA_Y'].data, dtype=float)
+        Z = np.asarray(generated['LISA_Z'].data, dtype=float)
+        data = linear_AET_conversion(X, Y, Z)
+    else:
+        raise ValueError(
+            "Generated waveform did not expose known channel sets. "
+            "Expected either AET or XYZ channels."
+        )
 
     # Filter channels if requested
     if channels is not None:

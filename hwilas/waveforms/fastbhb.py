@@ -14,6 +14,7 @@ import astropy.units as un
 import numpy as np
 from gwaith.types import TimeSeries
 from ldc.lisa import orbits
+from ldc.waveform.lisabeta import FastBHB
 
 from hwilas.data_processing.tdi import to_timeseries
 
@@ -79,15 +80,28 @@ _LDC_DEFAULTS = {
 # Lazily-created analytic LISA orbits, shared across calls.
 _analytic_orbits = None
 
+# Initial LISA orbit position for the Mojito orbit phase (radians). The LDC
+# FastBHB wrapper maps this onto lisabeta's ``Orbitt0``; without it the
+# templates see LISA in the wrong place (a ~330 s timing offset, on top of the
+# 800 s catalogue time-reference offset). See the Mojito orbit convention.
+MOJITO_INITIAL_POSITION_RAD = np.deg2rad(-140.0)
 
-def _get_lisa_orbits():
-    """Return (and cache) the default analytic LISA orbits."""
+
+def _get_lisa_orbits(initial_position_rad=MOJITO_INITIAL_POSITION_RAD):
+    """Return (and cache) the analytic LISA orbits.
+
+    Parameters
+    ----------
+    initial_position_rad : float, optional
+        Initial LISA orbit position in radians. Defaults to the Mojito value
+        (:data:`MOJITO_INITIAL_POSITION_RAD`).
+    """
     global _analytic_orbits
     if _analytic_orbits is None:
         _analytic_orbits = orbits.Orbits.type(dict({
             "nominal_arm_length": 2.5e9 * un.m,
             "initial_rotation": 0 * un.rad,
-            "initial_position": 0 * un.rad,
+            "initial_position": float(initial_position_rad) * un.rad,
             "orbit_type": "analytic",
         }))
     return _analytic_orbits
@@ -232,8 +246,6 @@ def get_td_waveform_from_fastbhb(
     else:
         length = int(params['length'])
         end_time = start_time + length * delta_t
-
-    from ldc.waveform.lisabeta import FastBHB
 
     fast_hm = FastBHB(
         "MBHB",
