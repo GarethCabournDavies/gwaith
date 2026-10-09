@@ -52,3 +52,6 @@ pip install --user ".[test]"
 > with `GIT_TERMINAL_PROMPT=0 GIT_ASKPASS= SSH_ASKPASS= pip install --user .` —
 > but note that requires temporarily reverting the dependency URLs in
 > `pyproject.toml` back to `git+https://...`.
+
+For Mojito preparation, search configuration and diagnostics, see
+[the search workflow](docs/mojito_search.md).

@@ -7,13 +7,15 @@ name = "hwilas"
 version = "0.1.0"
 description = "Command-line tools for MBHB LISA searches"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 dependencies = [
 	"numpy",
+	"tqdm",
+	"pyswarms>=1.3.0",
+	"h5py",
 	"scipy",
 	"matplotlib",
 	"gwaith @ git+ssh://git@github.com/uk-lisa-gs/gwaith.git",
-	"mojito",
     "mojito-processor @ git+https://github.com/OllieBurke/MojitoProcessor.git",
     "tdispline @ git+ssh://git@github.com/uk-lisa-gs/tdi-spline.git",
     "lisaorbits",
@@ -30,18 +32,27 @@ test = [
 ]
 
 [project.scripts]
+hwilas_stochastic_bank = "tools.template_banks.stochastic_bank:main"
+hwilas_validate_stochastic_bank = "tools.template_banks.validate_stochastic_bank:main"
+hwilas_verify_bank = "tools.template_banks.verify_bank:main"
+hwilas_plot_bank_verification = "tools.plotting.plot_bank_verification:main"
+hwilas_prepare_mojito = "tools.data_processing.prepare_mojito:main"
 hwilas_coincidence = "tools.search.coincidence:main"
+hwilas_subtract_signals = "tools.search.subtract_signals:main"
+hwilas_combine_search_parameters = "tools.search.combine_search_parameters:main"
+hwilas_check_search_residuals = "tools.search.check_search_residuals:main"
 hwilas_matched_filter_search = "tools.search.matched_filter_search:main"
 hwilas_optimise_snr_peaks = "tools.search.optimise_snr_peaks:main"
 hwilas_process_sangria_data = "tools.data_processing.process_sangria_data:main"
 hwilas_process_mojito_data_chunk = "tools.data_processing.process_mojito_data:main"
-hwilas_process_mojito_data_recombine = "tools.data_processing.process_mojito_data_recombine:main"
+hwilas_process_data_combine = "tools.data_processing.process_data_combine:main"
+hwilas_mojito_clean_windows = "tools.data_processing.mojito_clean_windows:main"
 hwilas_process_and_pad_mojito_chunk = "tools.data_processing.process_and_pad_mojito_chunk:main"
 hwilas_split_pad_data = "tools.data_processing.split_pad_data:main"
 hwilas_trigger_merge = "tools.search.trigger_merge:main"
 hwilas_optimal_snr = "tools.search.optimal_snr.optimal_snr_calculation:main"
 hwilas_plot_bank = "tools.template_banks.plot_mbhb_bank:main"
-hwilas_make_stochastic_bank = "tools.template_banks.make_stochastic_bank:main"
+hwilas_make_stochastic_bank = "tools.template_banks.stochastic_bank:main"
 hwilas_downsample_mojito = "tools.data_processing.downsample_mojito:main"
 hwilas_estimate_mojito_psd = "tools.psd_estimation.estimate_mojito_psd:main"
 hwilas_estimate_sangria_psd = "tools.psd_estimation.estimate_sangria_psd:main"
@@ -59,14 +70,5 @@ hwilas_plot_estimate_mojito_psd = "tools.plotting.plot_estimate_mojito_psd:main"
 hwilas_plot_chunked_data = "tools.plotting.plot_chunked_data:main"
 hwilas_extract_truth = "tools.data_processing.extract_truth:main"
 
-[tool.setuptools]
-packages = [
-	"hwilas",
-	"tools",
-	"tools.search",
-	"tools.search.optimal_snr",
-	"tools.psd_estimation",
-	"tools.template_banks",
-	"tools.plotting",
-	"tools.diagnostics",
-]
+[tool.setuptools.packages.find]
+include = ["hwilas*", "tools*"]

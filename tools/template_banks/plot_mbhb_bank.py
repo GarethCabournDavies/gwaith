@@ -57,7 +57,8 @@ def main():
     mass_ratio_range = (np.min(eta) - 0.1 * eta_range_size, 0.25)
     ranges = [mchirp_range, mass_ratio_range, spin_range]
 
-    n_bins = int(len(m1) / 10)
+    # Log-spaced histogram edges need at least two entries for small banks.
+    n_bins = max(2, int(len(m1) / 10))
 
     logger.info('Plotting')
     fig, axes = plt.subplots(3,3, figsize=(10,10))

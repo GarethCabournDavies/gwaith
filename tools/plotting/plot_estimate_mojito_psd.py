@@ -10,7 +10,7 @@ Example::
         --psd-files LISA_A:output/A_mojito_SMOOTHED_PSD.txt \
                    LISA_E:output/E_mojito_SMOOTHED_PSD.txt \
                    LISA_T:output/T_mojito_SMOOTHED_PSD.txt \
-        --output-directory output
+        --output-file output/mojito_psd.png
 """
 
 import argparse
@@ -43,9 +43,13 @@ def load_arguments():
         help="PSD input files, one per channel, given as channel:filename pairs"
     )
     parser.add_argument(
-        "--output-directory",
+        "--unsmoothed-psd-files", action=KeyValueAction, nargs='+',
+        help="Optional raw PSDs as channel:filename pairs, overlaid as dashed curves",
+    )
+    parser.add_argument(
+        "--output-file",
         required=True,
-        help="Directory in which to save the plot"
+        help="Output plot filename"
     )
     parser.add_argument(
         "--f-min",
@@ -79,15 +83,26 @@ def main():
     channels = list(args.psd_files.keys())
     logger.debug("Channels: %s", channels)
 
-    os.makedirs(args.output_directory, exist_ok=True)
+    if args.unsmoothed_psd_files and set(args.unsmoothed_psd_files) != set(channels):
+        raise ValueError("Provide an unsmoothed PSD for every plotted channel")
+
+    os.makedirs(os.path.dirname(os.path.abspath(args.output_file)), exist_ok=True)
 
     fig, ax = plt.subplots(figsize=(10, 6))
 
-    for channel in channels:
+    for index, channel in enumerate(channels):
+        color = f"C{index % 10}"
+        if args.unsmoothed_psd_files:
+            raw_freqs, raw_psd = load_psd_data(args.unsmoothed_psd_files[channel])
+            mask = (raw_freqs > 0) & (raw_psd > 0)
+            ax.plot(raw_freqs[mask], raw_psd[mask], color=color, linestyle="--",
+                    alpha=0.5, label=f"{channel} unsmoothed")
         psd_path = args.psd_files[channel]
         logger.info("Loading PSD for %s from %s", channel, psd_path)
         freqs, psd_data = load_psd_data(psd_path)
-        ax.plot(freqs, psd_data, label=channel)
+        mask = (freqs > 0) & (psd_data > 0)
+        label = f"{channel} smoothed" if args.unsmoothed_psd_files else channel
+        ax.plot(freqs[mask], psd_data[mask], color=color, label=label)
 
     ax.set_xscale('log')
     ax.set_yscale('log')
@@ -96,7 +111,7 @@ def main():
     ax.set_ylabel('PSD')
     ax.legend(loc='upper left')
 
-    output_path = os.path.join(args.output_directory, "mojito_psd.png")
+    output_path = args.output_file
     fig.savefig(output_path, bbox_inches='tight')
     plt.close(fig)
     logger.info("Saved plot to %s", output_path)

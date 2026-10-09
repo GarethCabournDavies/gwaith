@@ -43,6 +43,10 @@ def load_arguments():
         help="Output files for each channel, given as channel:filename pairs"
     )
     parser.add_argument(
+        "--unsmoothed-output-file", nargs="+", action=KeyValueAction,
+        help="Optional raw Welch PSD outputs as channel:filename pairs (native frequency grid)",
+    )
+    parser.add_argument(
         "--segment-duration",
         default=1576800,
         type=float,
@@ -64,6 +68,8 @@ def main():
     logger.info("Starting PSD estimation from processed mojito data")
 
     channels = list(args.output_file.keys())
+    if args.unsmoothed_output_file and set(args.unsmoothed_output_file) - set(channels):
+        raise ValueError("Unsmoothed outputs must refer to selected channels")
     logger.debug("Channels: %s", channels)
 
     # Load every data file, concatenating each channel across files so that the
@@ -148,7 +154,20 @@ def main():
         out_dir = os.path.dirname(output_path)
         if out_dir:
             os.makedirs(out_dir, exist_ok=True)
-        psds[channel].save(output_path)
+        # Downstream PSD readers expect frequency/PSD columns in plain text.
+        np.savetxt(output_path,
+                   np.column_stack((np.asarray(psds[channel].sample_frequencies),
+                                    np.asarray(psds[channel].data))),
+                   header="frequency_Hz PSD")
+
+    for channel, output_path in (args.unsmoothed_output_file or {}).items():
+        out_dir = os.path.dirname(output_path)
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
+        raw = full_psds[channel]
+        logger.debug("Saving unsmoothed %s PSD to %s", channel, output_path)
+        np.savetxt(output_path, np.column_stack((np.asarray(raw.sample_frequencies), raw.data)),
+                   header="frequency_Hz PSD_unsmoothed")
 
     if args.testing_plots:
         import os

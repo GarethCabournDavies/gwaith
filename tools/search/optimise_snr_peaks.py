@@ -2,208 +2,175 @@
 Optimise SNR for peaks found in coincidences
 """
 
-import gc
 import argparse
 import copy
+from concurrent.futures import ProcessPoolExecutor
+from multiprocessing import get_context
 import logging
 import h5py
 import numpy as np
 import pyswarms as ps
 
-from gwaith.types import TimeSeries
+from gwaith.types import TimeSeries, FrequencySeries
+from scipy.fft import next_fast_len
+from scipy.optimize import minimize
+from scipy.signal import detrend
+from scipy.signal.windows import tukey
+from hwilas.waveforms.short_fastbhb import template
+from hwilas.template_banks.frequency import lower_frequency_for_duration
 
 from hwilas import add_hwilas_common_options, init_logging
-from hwilas.conversions import mchirp_eta_from_mass1_mass2, mass1_mass2_from_mchirp_eta
+from hwilas.conversions import (mchirp_eta_from_mass1_mass2, mass1_mass2_from_mchirp_eta,
+                                chi_eff_from_component_spins)
 from hwilas.filter import matched_filter_frequencyseries, sigmasq_frequencyseries
 from hwilas.psd.read import from_txt as psd_from_txt
-from hwilas.waveforms.constants import TIME_OFFSET_20_DEGREES
 # Higher-mode (l, m) array used by the follow-up optimisation to build its
 # higher-mode template.
 DEFAULT_HM_MODE_ARRAY = [(2, 2), (2, 1), (3, 3), (3, 2), (4, 4), (4, 3)]
 from hwilas.types import KeyValueAction
-from hwilas.waveforms import get_fd_waveform
-from hwilas.template_banks.helpers import waveform_from_bank
+from hwilas.search.rounds import previous_window_flags
 
 logger = logging.getLogger(__name__)
 
 
+PARAMETERS = ('mchirp', 'eta', 'spin1z', 'spin2z', 'eclipticlongitude',
+              'eclipticlatitude', 'inclination', 'tc', 'polarization', 'coa_phase')
+
+
+def _data_frequencyseries(data):
+    """Continuous Fourier convention, independent of installed GWAITH version."""
+    return {c: FrequencySeries(ts.delta_t*np.fft.rfft(ts.data),
+                              delta_f=1/(len(ts)*ts.delta_t), epoch=ts.epoch)
+            for c, ts in data.items()}
+
+
 def build_aligned_waveform(v, data, waveform_params_shared, raise_err=False, waveform_channels=None):
-    mass1, mass2 = mass1_mass2_from_mchirp_eta(v[0], v[1])
-
-    if waveform_channels is None:
-        waveform_channels = list(data.keys())
-
-    for channel in data.keys():  # Use data.keys() (optimisation channels) to get delta_t and epoch
-        try:
-            delta_t = data[channel].delta_t
-            data_start_time = data[channel].epoch
-            break
-        except KeyError:
-            continue
-    else:
-        raise KeyError(
-            "No channels from passed option are present in data"
-        )
-
-    
-    waveform_params = copy.deepcopy(waveform_params_shared)
-    waveform_params.setdefault("distance", 1.0)
-
-    # The time of coalescence is given as an absolute GPS time in v[7].
-    # We need to convert it to a time relative to the start of the data segment
-    # for the waveform generator.
-    coalescence_in_segment = v[7] - data_start_time
-
-    waveform_params.update({
-        "mass1": mass1,
-        "mass2": mass2,
-        "spin1z": v[2],
-        "spin2z": v[3],
-        "eclipticlongitude": v[4],
-        "eclipticlatitude": v[5],
-        "inclination": v[6],
-        "tc": coalescence_in_segment,
-        "polarization": v[8],
-    })
-
+    """Generate the physical short waveform aligned to the event data grid."""
+    first = next(iter(data.values()))
+    channels = waveform_channels or list(data)
     try:
-        wf = get_fd_waveform(
-            **waveform_params,
-            ifos=waveform_channels
-        )
-    except RuntimeError:
+        m1, m2 = mass1_mass2_from_mchirp_eta(v[0], v[1])
+        p = dict(mass1=m1, mass2=m2, spin1z=v[2], spin2z=v[3],
+                 eclipticlongitude=v[4], eclipticlatitude=v[5], inclination=v[6],
+                 tc=v[7], polarization=v[8],
+                 coa_phase=v[9] if len(v)>9 else waveform_params_shared.get('coa_phase',0.),
+                 distance=waveform_params_shared.get('distance',1e4))
+        if not first.epoch < p['tc'] < first.epoch+len(first)*first.delta_t:
+            raise ValueError("Merger lies outside the event window")
+        settings = dict(delta_t=first.delta_t, initial_position_deg=-140.,
+                        laser_frequency=waveform_params_shared.get('template_scale',1.),
+                        f_lower=waveform_params_shared['f_lower'],
+                        f_upper=waveform_params_shared.get('f_upper',.09),
+                        pre_merger_days=1., taper_seconds=3600.,
+                        tdi=waveform_params_shared.get('tdi','2'), channels=channels,
+                        reference_tc=p['tc']-float(first.epoch))
+        cutoff = lower_frequency_for_duration(p,settings)
+        settings['f_lower'] = cutoff
+        # Translate orbit and time together; every candidate uses the same FFT grid.
+        tm = template(p,float(first.epoch),len(first),settings,modes=DEFAULT_HM_MODE_ARRAY)
+        t = float(first.epoch)+np.arange(len(first))*first.delta_t
+        ramp = .5-.5*np.cos(np.pi*np.clip((t-(p['tc']-86400.))/3600.,0,1))
+        result = {}
+        for c in channels:
+            h = first.delta_t*np.fft.rfft(tm[c]*ramp)
+            h[:int(cutoff/(1/(len(first)*first.delta_t)))] = 0
+            result[c] = FrequencySeries(h,delta_f=1/(len(first)*first.delta_t),epoch=first.epoch)
+        return result
+    except (ValueError, RuntimeError, SystemError, FloatingPointError):
         if raise_err:
             raise
         return None
 
-    # The waveform generator sets `tc` directly, so no explicit time shift is applied.
-    return wf
+
+def coherent_fit(wf, data_fs, psd, channels):
+    """Solve a positive real amplitude, equivalent to a physical distance."""
+    numerator, norm = 0., 0.
+    for c in channels:
+        H, D = wf[c].data, data_fs[c].data
+        S = psd[c].data if isinstance(psd,dict) else psd.data
+        if len(H)!=len(D) or len(H)!=len(S):
+            raise ValueError('Waveform, data and PSD grids must agree')
+        valid = np.isfinite(S) & (S>0)
+        weight = 4*wf[c].delta_f
+        numerator += weight*np.sum(np.conj(H[valid])*D[valid]/S[valid]).real
+        norm += weight*np.sum(abs(H[valid])**2/S[valid])
+    if not np.isfinite(norm) or norm<=0:
+        return -np.inf, 0.
+    numerator = max(0.,float(numerator))
+    return numerator/np.sqrt(norm), numerator/norm
 
 
-def compute_network_snr_core(v, data, psd, waveform_params_shared, optimisation_channels, raise_err=False):
-    wf = build_aligned_waveform(
-        v,
-        data,
-        waveform_params_shared,
-        raise_err=raise_err,
-        # Generate waveform for all channels that might be needed for output, but only use optimisation_channels for SNR
-        waveform_channels=list(data.keys()) # data here contains only optimisation channels
-    )
+def profile_merger_time(wf, data_fs, psd, channels, n, dt, tc, bounds):
+    """Maximise the real physical-template correlation within the time bounds."""
+    q = np.zeros(n//2+1, dtype=complex)
+    norm = 0.
+    df = wf[channels[0]].delta_f
+    for c in channels:
+        H,D,S = wf[c].data,data_fs[c].data,psd[c].data
+        valid = np.isfinite(S) & (S>0)
+        q[valid] += np.conj(H[valid])*D[valid]/S[valid]
+        norm += 4*df*np.sum(abs(H[valid])**2/S[valid])
+    if not np.isfinite(norm) or norm<=0:
+        return -np.inf,tc
+    correlation = np.fft.irfft(q,n=n)*n*2*df/np.sqrt(norm)
+    lower = int(np.ceil((bounds[0]-tc)/dt))
+    upper = int(np.floor((bounds[1]-tc)/dt))
+    lags = np.arange(lower,upper+1)
+    if not len(lags):
+        return -np.inf,tc
+    index = int(lags[np.argmax(correlation[lags % n])])
+    left,centre,right = correlation[(index+np.array([-1,0,1])) % n]
+    curvature = left-2*centre+right
+    offset = np.clip(.5*(left-right)/curvature,-.5,.5) if curvature<0 else 0.
+    time = float(np.clip(tc+(index+offset)*dt,*bounds))
+    peak = centre-.25*(left-right)*offset
+    return max(0.,float(peak)),time
+
+
+def profile_physical_fit(v, data, psd, waveform_params_shared, optimisation_channels,
+                         tc_reference, time_bounds, raise_err=False):
+    """Profile merger time while the swarm searches the physical shape parameters."""
+    full = np.insert(v,7,tc_reference) if len(v)==9 else np.asarray(v).copy()
+    wf = build_aligned_waveform(full,data,waveform_params_shared,raise_err)
     if wf is None:
-        # The waveform generation has failed - instead of actually failing,
-        # just say that this waveform is not allowed.
+        return -np.inf,full
+    first = next(iter(data.values()))
+    data_fs = waveform_params_shared.get('data_fs') or _data_frequencyseries(data)
+    rho,full[7] = profile_merger_time(wf,data_fs,psd,optimisation_channels,
+                                    len(first),first.delta_t,full[7],time_bounds)
+    return rho,full
+
+
+def compute_network_snr_core(v, data, psd, waveform_params_shared, optimisation_channels,
+                             raise_err=False, tc_reference=None, time_bounds=None):
+    if time_bounds is not None:
+        return profile_physical_fit(v,data,psd,waveform_params_shared,optimisation_channels,
+                                    tc_reference,time_bounds,raise_err)[0]
+    wf = build_aligned_waveform(v,data,waveform_params_shared,raise_err)
+    if wf is None:
         return -np.inf
-
-    snrsq = 0.0
-    for channel in optimisation_channels:
-        snr_ts = matched_filter_frequencyseries(
-            wf[channel],
-            data[channel].to_frequencyseries(),
-            psd=psd,
-            n_samples=len(data[channel]),
-            epoch=float(data[channel].epoch),
-        )
-
-        # v[7] is the absolute GPS time of coalescence.
-        # The snr_ts.sample_times represent the merger time of the template.
-        # Find the SNR at the specified coalescence time.
-        time_offset_from_epoch = v[7] - snr_ts.epoch
-        index_at_coalescence = int(round(time_offset_from_epoch / snr_ts.delta_t))
-
-        if 0 <= index_at_coalescence < len(snr_ts.data):
-            snr_at_coalescence = snr_ts.data[index_at_coalescence]
-        else:
-            logger.warning("Coalescence time %.3f is outside the range of SNR time series for channel %s. Returning -inf.", v[7], channel)
-            return -np.inf
-
-        snrsq += abs(snr_at_coalescence) ** 2
-
-    return snrsq ** 0.5
+    data_fs = waveform_params_shared.get('data_fs') or _data_frequencyseries(data)
+    return coherent_fit(wf,data_fs,psd,optimisation_channels)[0]
 
 
 def get_snr_and_distance_factor(wf, data, psd, optimisation_channels):
-    """
-    Calculate the network SNR and distance factor for a given waveform.
-
-    The distance factor is the value to divide a unit-distance (1 Mpc)
-    waveform by to match the amplitude of the signal in the data.
-    """
-    snrsq = 0.0 # This is the network SNR squared
-    hhsq = 0.0
-    for channel in optimisation_channels:
-        snr_ts = matched_filter_frequencyseries(
-            wf[channel],
-            data[channel].to_frequencyseries(),
-            psd=psd,
-            n_samples=len(data[channel]),
-            epoch=float(data[channel].epoch),
-        )
-
-        snr_at_coalescence = snr_ts.abs().max()
-
-        snrsq += snr_at_coalescence ** 2
-        hhsq += sigmasq_frequencyseries(wf[channel], psd)
-
-    network_snr = snrsq ** 0.5
-    if hhsq <= 0 or snrsq <= 0:
-        return network_snr, np.inf
-
-    distance_factor = (hhsq ** 0.5) / network_snr
-    return network_snr, distance_factor
+    rho, amp = coherent_fit(wf,_data_frequencyseries(data),psd,optimisation_channels)
+    return rho, 1/abs(amp) if abs(amp)>0 else np.inf
 
 
-def shift_and_normalise_waveform(
-    wf_fd,
-    coalescence_in_segment,
-    data,
-    psd, # This PSD is for the optimisation channels
-    optimisation_channels,
-    delta_t,
-    output_channels
-):
-    """
-    Takes a frequency domain waveform with the merger at the end, shifts it
-    to the correct time, calculates the distance factor, normalises it, and
-    returns a time series version for plotting, along with the calculated
-    network SNR and distance factor.
-    """
-    # 1. Align waveform to data
-    wf_aligned = {} # This will contain all output channels
-    # The epoch should be the same for all channels, so we can just get it
-    # from the first optimisation channel which is guaranteed to be in data.
-    epoch = float(data[optimisation_channels[0]].epoch)
-    for channel in output_channels:
-        wf_aligned[channel] = wf_fd[channel].copy()
-        wf_aligned[channel].epoch = epoch
-        wf_aligned[channel] = wf_aligned[channel].cyclic_time_shift(
-            coalescence_in_segment
-        )
+def shift_and_normalise_waveform(wf_fd, coalescence_in_segment, data, psd,
+                                 optimisation_channels, delta_t, output_channels):
+    """Normalise a cyclic-zero-merger FD template for plotting."""
+    first = next(iter(data.values()))
+    aligned = {c:wf_fd[c].cyclic_time_shift(coalescence_in_segment) for c in output_channels}
+    rho, amp = coherent_fit(aligned,_data_frequencyseries(data),psd,optimisation_channels)
+    out = {c:TimeSeries(np.fft.irfft(amp*aligned[c].data,n=len(first))/delta_t,
+                       epoch=first.epoch,delta_t=delta_t) for c in output_channels}
+    return out,rho,1/abs(amp) if abs(amp)>0 else np.inf
 
-    # 2. Get SNR and distance factor using the aligned waveform
-    network_snr, distance_factor = get_snr_and_distance_factor(
-        wf_aligned,
-        data, # This data contains only optimisation channels
-        psd,
-        optimisation_channels,
-    )
 
-    # 3. Normalise the aligned waveform and convert to a time series
-    wf_ts = {} # This will contain all output channels
-    for channel in output_channels:
-        if np.isfinite(distance_factor):
-            wf_aligned[channel] /= distance_factor
-        wf_ts[channel] = wf_aligned[channel].to_timeseries(delta_t=delta_t)
-
-    return wf_ts, network_snr, distance_factor
-
-    
 def compute_minus_network_snr(positions, **kwargs):
-    costs = np.empty(len(positions), dtype=np.float64)
-    for idx, v in enumerate(positions):
-        nsnr = compute_network_snr_core(v, **kwargs)
-        logger.debug("snr: %.3f", nsnr)
-        costs[idx] = -nsnr
-    return costs
+    return np.array([-compute_network_snr_core(v,**kwargs) for v in positions])
 
 
 def load_arguments():
@@ -217,15 +184,15 @@ def load_arguments():
     parser.add_argument(
         "--statistic-threshold",
         type=float,
-        default=60,
+        default=40,
         help="When deciding the events to optimise / add to signal timeseries, use this threshold. "
-        "Default 60."
+        "Default 40."
     )
     parser.add_argument(
         "--minimum-peak-separation",
         type=float,
-        default=604800,
-        help="Minimum separation of peaks to be optimised. Seconds. Default 604800 (1 week)"
+        default=86400,
+        help="Minimum separation of peaks to be optimised. Seconds. Default 86400 (1 day)"
     )
     parser.add_argument(
         "--bank-file",
@@ -241,7 +208,6 @@ def load_arguments():
     )
     parser.add_argument(
         "--psd-file",
-        required=True,
         help="File containing the PSD"
     )
     parser.add_argument(
@@ -257,11 +223,13 @@ def load_arguments():
         help="Channels that will be used for optimisation. "
         "Default LISA_A and LISA_E."
     )
+    parser.add_argument("--fit-channels",nargs='+',
+                        help="Channels constraining the physical fit; defaults to the coincidence channels")
     parser.add_argument(
         "--output-timeseries-channels",
         nargs='+',
-        default=['LISA_A', 'LISA_E', 'LISA_T'], # Default to all three for output
-        help="Channels that will be used for optimisation. "
+        default=['LISA_A', 'LISA_E', 'LISA_T'],
+        help="Channels predicted from the fitted physical parameters. "
         "Default LISA_A, LISA_E and LISA_T."
     )
     parser.add_argument(
@@ -334,8 +302,36 @@ def load_arguments():
         help="Which generation of TDI to use when generating the waveform"
     )
 
+    parser.add_argument("--psd-files",nargs='+',action=KeyValueAction,
+                        help="Channel-specific PSDs as channel:filename pairs")
+    parser.add_argument("--f-upper",type=float,default=.09)
+    parser.add_argument("--n-iterations",type=int,default=100)
+    parser.add_argument("--n-processes",type=int,default=1,
+                        help="Particle workers within one event; default 1")
+    parser.add_argument("--event-workers",type=int,default=1,
+                        help="Concurrent complete event fits, including local refinement; default 1")
+    parser.add_argument("--polish-evaluations",type=int,default=1000,
+                        help="Maximum bounded local-refinement evaluations after the swarm; 0 disables it")
+    parser.add_argument("--phase-seed-count",type=int,default=16,
+                        help="Physical coalescence phases checked before the swarm; default 16")
+    parser.add_argument("--previous-parameter-file",
+                        help="Flag candidates within the saved optimisation windows of this earlier round")
     args = parser.parse_args()
+    if args.psd_file is None and args.psd_files is None:
+        parser.error("Provide --psd-file or --psd-files")
+    if args.polish_evaluations < 0:
+        parser.error("Polish evaluations must be nonnegative")
+    if args.statistic_threshold < 0 or args.minimum_peak_separation < 0:
+        parser.error("SNR threshold and minimum separation must be nonnegative")
+    if min(args.n_particles,args.n_iterations,args.n_processes,args.event_workers,args.phase_seed_count)<1:
+        parser.error("Particle, iteration and process counts must be positive")
 
+    if args.event_workers>1 and args.n_processes>1:
+        parser.error("Use event workers or particle workers, not both")
+
+    args.fit_channels = args.fit_channels or args.optimisation_channels
+    if args.psd_files and any(c not in args.psd_files for c in args.fit_channels):
+        parser.error("Provide a PSD for every fit channel")
     init_logging(args.verbose)
 
     # Do a checks on the arguments:
@@ -375,7 +371,7 @@ def get_events_to_optimise(args):
     logger.info("%d events in file", len(coinc_stat))
 
     # remove anything not above the statistic threshold
-    above_threshold = coinc_stat > args.statistic_threshold
+    above_threshold = coinc_stat >= args.statistic_threshold
     coinc_stat = coinc_stat[above_threshold]
     coinc_time = coinc_time[above_threshold]
     for channel in args.optimisation_channels:
@@ -389,50 +385,13 @@ def get_events_to_optimise(args):
         args.statistic_threshold
     )
 
-    # Sort the events by time to make the next step easier
-    time_sort = np.argsort(coinc_time)
-    coinc_stat = coinc_stat[time_sort]
-    coinc_time = coinc_time[time_sort]
-    for channel in args.optimisation_channels:
-        coinc_times_by_channel[channel] = (
-            coinc_times_by_channel[channel][time_sort]
-        )
-    coinc_tempid = coinc_tempid[time_sort]
-
-    # Now, we use a greedy algorithm to sort through the remaining events and 
-    # remove anything within the minimum separation window.
-    # We will optimise however many are above the threshold and separated by the
-    # minimum peak separation
-    loudest_idx = 0
-    while True:
-        if not any(abs(np.diff(coinc_time)) < args.minimum_peak_separation):
-            break
-
-        # If this is the Nth iteration, the the Nth loudest of the remaining
-        # triggers
-        stat_sort = np.argsort(coinc_stat)
-        loudest_time = coinc_time[stat_sort[loudest_idx]]
-
-        # These are the events to be removed
-        within_window = abs(coinc_time - loudest_time) < args.minimum_peak_separation
-        # Dont remove the event itself though
-        within_window[loudest_idx] = False
-
-        logger.info(
-            "Removing %d events within %.1f days of loudest event at time %.3f",
-            np.sum(within_window),
-            args.minimum_peak_separation / 86400,
-            loudest_time / 86400
-        )
-        coinc_stat = coinc_stat[~within_window]
-        coinc_time = coinc_time[~within_window]
-        for channel in args.optimisation_channels:
-            coinc_times_by_channel[channel] = (
-                coinc_times_by_channel[channel][~within_window]
-            )
-        coinc_tempid = coinc_tempid[~within_window]
-
-        loudest_idx += 1
+    # Keep loudest-first representatives without confusing sorted and original indices.
+    kept = []
+    for i in np.argsort(-coinc_stat):
+        if all(abs(coinc_time[i]-coinc_time[j]) >= args.minimum_peak_separation for j in kept):
+            kept.append(int(i))
+    coinc_stat, coinc_time, coinc_tempid = coinc_stat[kept], coinc_time[kept], coinc_tempid[kept]
+    coinc_times_by_channel = {c:t[kept] for c,t in coinc_times_by_channel.items()}
 
     logger.info(
         "%d events remain after minimum separation requirement",
@@ -451,8 +410,8 @@ def get_events_to_optimise(args):
 
     for i, (time, stat, tempid) in enumerate(zip(coinc_time, coinc_stat, coinc_tempid)):
         logger.debug(
-            "Event %d at time %.1f days with statistic %.3f, template %d",
-            i,
+            "Event %d / %d at time %.1f days with statistic %.3f, template %d",
+            i+1, len(coinc_stat),
             time / 86400,
             stat,
             tempid
@@ -550,505 +509,233 @@ def get_data_file_starts_ends(data_files, channel):
 
     return data_starts, data_ends, delta_t
 
-def identify_file_of_coinc(data_starts, data_ends, coinc_times):
-    """For each coinc time, identify which data file it belongs within"""
-    n_coincs = len(coinc_times)
-    coinc_chunks = np.zeros(n_coincs, dtype=np.uint32)
-    for i, coinc_time in enumerate(coinc_times):
-        start_idx = np.searchsorted(data_starts, coinc_time) - 1
-        end_idx = np.searchsorted(data_ends, coinc_time)
-        if start_idx == end_idx:
-            # The coinc lies perfectly within exactly one chunk
-            logger.debug(
-                "The event at %.3f days is entirely in chunk %d",
-                coinc_time / 86400,
-                start_idx
-            )
-            coinc_chunks[i] = start_idx
-        elif (end_idx - start_idx) == 1:
-            # The coinc straddles the overlap between two chunks
-            logger.debug(
-                "The event at %.3f days is in the overlap between chunks %d and %d",
-                coinc_time / 86400,
-                start_idx,
-                end_idx
-            )
-            # In this case always return the earlier chunk
-            coinc_chunks[i] = start_idx
-        else:
-            raise ValueError(
-                "Could Not identify the chunk for event at %.3f days",
-                coinc_time / 86400
-            )
-    return coinc_chunks
+def identify_file_of_coinc(data_starts,data_ends,coinc_times):
+    ids=[]
+    for time in coinc_times:
+        candidates=np.flatnonzero((data_starts<=time)&(time<data_ends))
+        if not len(candidates):
+            raise ValueError(f"No data file covers event at {time}")
+        ids.append(int(candidates[0]))
+    return np.array(ids,dtype=np.uint32)
+
+
+def _optimise_event(task):
+    """Fit one independent data window and return only its model segment."""
+    (args, idx, count, path, time, channel_time, template_id, statistic,
+     bank, dt, previous_flag, previous_index) = task
+    with h5py.File(path, 'r') as f:
+        source_epoch = float(f.attrs['epoch'])
+        length = len(f[args.optimisation_channels[0]])
+        j0 = max(0, int(np.floor((time-args.optimisation_window_before-source_epoch)/dt)))
+        j1 = min(length, int(np.ceil((time+args.optimisation_window_after-source_epoch)/dt)))
+        if j1<=j0:
+            raise ValueError('Empty optimisation window')
+        n = next_fast_len(j1-j0)
+        if n % 2:
+            n = next_fast_len(n+1)
+        event_epoch = source_epoch+j0*dt
+        data = {c:TimeSeries(np.pad(np.asarray(f[c][j0:j1]), (0,n-(j1-j0))),
+                             epoch=event_epoch,delta_t=dt) for c in args.fit_channels}
+        scale = 1. if f.attrs.get('divide_by_laser_frequency',True) else float(f.attrs.get('laser_frequency',2.816e14))
+    initial = {p:float(bank[p]) for p in _BANK_PARAMETERS}
+    initial['mchirp'], initial['eta'] = mchirp_eta_from_mass1_mass2(initial['mass1'],initial['mass2'])
+    initial['tc'] = float(channel_time)
+    initial['coa_phase'] = float(bank['coa_phase'])
+    lower, upper = [], []
+    for p in PARAMETERS:
+        lo = args.minimum_bounds.get(p, 0. if p=='coa_phase' else -np.inf)
+        hi = args.maximum_bounds.get(p, 2*np.pi if p=='coa_phase' else np.inf)
+        relative = args.bounds_window_relative_to_initial
+        if p in relative:
+            lo, hi = max(lo,initial[p]-relative[p]), min(hi,initial[p]+relative[p])
+        elif 'log_'+p in relative:
+            lo, hi = max(lo,initial[p]*10**(-relative['log_'+p])), min(hi,initial[p]*10**relative['log_'+p])
+        if p=='tc':
+            lo,hi=max(lo,event_epoch+dt),min(hi,event_epoch+(j1-j0-1)*dt)
+        if not np.isfinite([lo,hi]).all() or hi<=lo:
+            raise ValueError(f'Provide finite increasing bounds for {p}')
+        lower.append(lo)
+        upper.append(hi)
+    seed = np.clip([initial[p] for p in PARAMETERS],lower,upper)
+    rng = np.random.default_rng(args.seed+idx)
+    population = rng.uniform(lower,upper,(args.n_particles,len(PARAMETERS)))
+    population[0] = seed
+    df = 1/(n*dt)
+    psds = {}
+    for c in args.fit_channels:
+        psd_path = args.psd_files[c] if args.psd_files else args.psd_file
+        psds[c] = psd_from_txt(psd_path,n//2+1,df,args.f_lower,is_asd_file=False)
+        frequency = np.arange(n//2+1)*df
+        psds[c].data[(frequency<args.f_lower)|(frequency>args.f_upper)] = np.inf
+    shared = dict(f_lower=args.f_lower,f_upper=args.f_upper,tdi=args.tdi_generation,
+                  distance=initial['distance'],template_scale=scale,data_fs=_data_frequencyseries(data))
+    kwargs = dict(data=data,psd=psds,waveform_params_shared=shared,
+                  optimisation_channels=args.fit_channels,
+                  tc_reference=seed[7],time_bounds=(lower[7],upper[7]))
+    # A physical phase seed avoids relying on an arbitrary complex rotation.
+    phase_candidates = [seed[9], *np.linspace(lower[9],upper[9],args.phase_seed_count,endpoint=False)]
+    initial_snr = -np.inf
+    for phase in phase_candidates:
+        candidate = seed.copy()
+        candidate[9] = phase
+        rho,candidate = profile_physical_fit(candidate,**kwargs,raise_err=True)
+        if rho>initial_snr:
+            initial_snr,seed = rho,candidate
+    if not np.isfinite(initial_snr) or initial_snr<=0:
+        raise ValueError('Initial template has no positive physical SNR')
+    initial_snr = compute_network_snr_core(seed,data,psds,shared,args.fit_channels,raise_err=True)
+    kwargs['tc_reference'] = seed[7]
+    shape_indices = [i for i,p in enumerate(PARAMETERS) if p!='tc']
+    shape_lower,shape_upper = np.asarray(lower)[shape_indices],np.asarray(upper)[shape_indices]
+    shape_seed = seed[shape_indices]
+    population = rng.uniform(shape_lower,shape_upper,(args.n_particles,len(shape_indices)))
+    # Keep half the swarm near the bank seed while the rest explores the bounds.
+    near = max(1,args.n_particles//2)
+    spread = .05*(shape_upper-shape_lower)
+    spread[0] = min(spread[0],.03*shape_seed[0])
+    population[:near] = np.clip(shape_seed+rng.normal(size=(near,len(shape_indices)))*spread,
+                               shape_lower,shape_upper)
+    population[0] = shape_seed
+    seed_masses = mass1_mass2_from_mchirp_eta(seed[0],seed[1])
+    initial_chi_eff = chi_eff_from_component_spins(*seed_masses,seed[2],seed[3])
+    logger.info(
+        'Event %d / %d before optimisation: time=%.3f s (%.6f days), '
+        'initial template SNR (higher-order modes)=%.3f, chirp mass=%.6g Msun, chi_eff=%.6f; '
+        'coincidence quadrature-sum SNR ((2,2) only)=%.3f, template=%d',
+        idx+1, count, seed[7], seed[7]/86400., initial_snr, seed[0], initial_chi_eff,
+        statistic, template_id)
+    if previous_flag:
+        logger.info('Event %d / %d FLAG: coincidence lies inside first-round event %d optimisation window',
+                    idx+1, count, previous_index+1)
+    np.random.seed(args.seed+idx)
+    optimiser = ps.single.GlobalBestPSO(n_particles=args.n_particles,dimensions=len(shape_indices),
+        options={'c1':.5,'c2':.3,'w':.9},bounds=(shape_lower,shape_upper),init_pos=population)
+    cost, best = optimiser.optimize(compute_minus_network_snr,iters=args.n_iterations,
+        n_processes=args.n_processes if args.n_processes>1 else None,verbose=False,**kwargs)
+    if not np.isfinite(cost) or -cost<initial_snr:
+        best = shape_seed
+    polish_evaluations,polish_success = 0,False
+    if args.polish_evaluations:
+        # Normalise parameter units for a bounded local refinement.
+        width = shape_upper-shape_lower
+        def local_objective(position):
+            return -compute_network_snr_core(shape_lower+position*width,**kwargs)
+        position = np.clip((best-shape_lower)/width,0,1)
+        local = minimize(local_objective,position,method='Nelder-Mead',
+            bounds=[(0.,1.)]*len(position),
+            options=dict(maxfev=args.polish_evaluations,xatol=1e-5,fatol=1e-4))
+        polish_evaluations,polish_success = local.nfev,bool(local.success)
+        if np.isfinite(local.fun) and local.fun<local_objective(position):
+            best = shape_lower+local.x*width
+        logger.debug('Event %d / %d local refinement: %d evaluations, converged=%s',
+                     idx+1,count,polish_evaluations,polish_success)
+    _,best = profile_physical_fit(best,**kwargs,raise_err=True)
+    wf = build_aligned_waveform(best,data,shared,raise_err=True)
+    rho,amplitude = coherent_fit(wf,shared['data_fs'],psds,args.fit_channels)
+    if amplitude<=0 or rho<initial_snr:
+        best = seed
+        wf = build_aligned_waveform(best,data,shared,raise_err=True)
+        rho,amplitude = coherent_fit(wf,shared['data_fs'],psds,args.fit_channels)
+    if amplitude<=0:
+        raise ValueError('No positive distance scale for fitted event')
+    fitted_distance = initial['distance']/amplitude
+    physical_shared = {**shared,'distance':fitted_distance}
+    # Predict every output channel from the same distance and physical phase.
+    wf = build_aligned_waveform(best,data,physical_shared,raise_err=True,
+                                waveform_channels=args.output_timeseries_channels)
+    rho,_ = coherent_fit(wf,shared['data_fs'],psds,args.fit_channels)
+    segments = {c:(np.fft.irfft(wf[c].data,n=n)/dt)[:j1-j0]
+                for c in args.output_timeseries_channels}
+    record = dict(zip(PARAMETERS,best))
+    record['mass1'],record['mass2'] = mass1_mass2_from_mchirp_eta(best[0],best[1])
+    record.update(initial_template_id=template_id,initial_stat=statistic,optimised_stat=rho,
+                  distance=fitted_distance,
+                  amplitude_phase=0., initial_time=float(time),
+                  initial_fit_snr=initial_snr,
+                  optimisation_window_start=event_epoch,
+                  optimisation_window_end=source_epoch+j1*dt,
+                  in_previous_window=previous_flag, previous_event_index=previous_index,
+                  polish_evaluations=polish_evaluations,polish_success=polish_success)
+    record['f_lower'] = lower_frequency_for_duration(record,
+        dict(f_lower=args.f_lower, f_upper=args.f_upper, pre_merger_days=1.))
+    logger.info(
+        'Event %d / %d after optimisation: time=%.3f s (%.6f days), '
+        'optimised SNR (higher-order modes)=%.3f, chirp mass=%.6g Msun, chi_eff=%.6f',
+        idx+1, count, best[7], best[7]/86400., rho, best[0],
+        chi_eff_from_component_spins(record['mass1'],record['mass2'],best[2],best[3]))
+    return record, event_epoch, segments
 
 
 def main():
-
     args = load_arguments()
-
-    # Some libraries, like pyswarms, may add a default StreamHandler to the root
-    # logger upon import. This can lead to duplicate log messages. To prevent this,
-    # we find and remove any pre-existing StreamHandlers before initializing
-    # our own logging.
-    logging.getLogger().handlers.clear()
-
-    init_logging(args.verbose)
-
-    coinc_stat, coinc_time, coinc_times_by_channel, coinc_tempid = (
-        get_events_to_optimise(args)
-    )
-
-    bank = get_bank_parameters(args.bank_file, coinc_tempid)
-
-    logger.info("Getting start and end times for data files")
-    data_file_starts, data_file_ends, delta_t = get_data_file_starts_ends(
-        args.data_files,
-        args.optimisation_channels[0]
-    )
-
-    full_duration = data_file_ends[-1] - data_file_starts[0]
-    n_samples_total = int(full_duration / delta_t)
-
-    logger.debug(
-        "Data files start, end at %s",
-        " ".join(f"{dfs/86400:.1f}-{dfe/86400:.1f}" for dfs, dfe in zip(data_file_starts, data_file_ends, strict=True))
-    )
-
-    logger.info("Identifying which coincs are in which data files")
-    coinc_chunks = identify_file_of_coinc(
-        data_file_starts,
-        data_file_ends,
-        coinc_time
-    )
-
-    # We are only going to output chirp mass and time as the parameters that can be
-    # estimated relatively accurately and passed to parameter estimation, but the optimiser
-    # needs other parameters passed to it
-    optimiser_parameters = [
-        'mchirp',
-        'eta',
-        'spin1z',
-        'spin2z',
-        'eclipticlongitude',
-        'eclipticlatitude',
-        'inclination',
-        'tc',
-        "polarization",
+    stats, times, channel_times, ids = get_events_to_optimise(args)
+    previous_flags, previous_indices = previous_window_flags(times, args.previous_parameter_file)
+    bank = get_bank_parameters(args.bank_file, ids)
+    starts, ends = [], []
+    metadata = None
+    for path in args.data_files:
+        with h5py.File(path, 'r') as f:
+            dt = float(f.attrs['delta_t'])
+            if metadata is not None and dt != metadata['delta_t']:
+                raise ValueError('Data files must share a cadence')
+            metadata = dict(f.attrs)
+            starts.append(float(f.attrs['epoch']))
+            ends.append(starts[-1]+len(f[args.optimisation_channels[0]])*dt)
+    epoch, end = min(starts), max(ends)
+    signals = {c:np.zeros(round((end-epoch)/dt)) for c in args.output_timeseries_channels}
+    records = []
+    chunks = identify_file_of_coinc(np.array(starts), np.array(ends), times)
+    logger.info('Optimising %d events in decreasing coincident network SNR order', len(times))
+    tasks = [
+        (args, idx, len(times), args.data_files[chunks[idx]], float(times[idx]),
+         float(channel_times[args.optimisation_channels[0]][idx]), int(ids[idx]), float(stats[idx]),
+         {p:float(values[idx]) for p,values in bank.items()}, dt,
+         bool(previous_flags[idx]), int(previous_indices[idx]))
+        for idx in range(len(times))
     ]
-
-    optimised_parameters = {
-        'initial_template_id': [],
-        'initial_stat': [],
-        'optimised_stat': [],
-        'mchirp': [],
-        'eta': [],
-        'mass1': [],
-        'mass2': [],
-        'spin1z': [],
-        'spin2z': [],
-        'eclipticlongitude': [],
-        'eclipticlatitude': [],
-        'inclination': [],
-        'tc': [],
-        'polarization': [],
-        'distance': [],
-    }
-
-    logger.info("Determining bounds for parameters not relative to initial")
-
-    # All optimiser parameters need to have min and max. These should be set from the dynamic options or
-    # static min/max
-    for parameter in optimiser_parameters:
-        if parameter in args.bounds_window_relative_to_initial:
-            # min/max are going to be set dynamically
-            continue
-        if parameter not in args.maximum_bounds and parameter not in args.minimum_bounds:
-            raise ValueError(
-                f"Minimum and Maximum values need to be set for {parameter}"
-            )
-
-    static_parameter_bounds = {
-        parameter: (None, None)
-        for parameter in optimiser_parameters
-    }
-
-    for parameter in optimiser_parameters:
-        min_bound = -np.inf
-        max_bound = np.inf
-        if parameter in args.maximum_bounds:
-            max_bound = min(max_bound, args.maximum_bounds[parameter])
-        if parameter in args.minimum_bounds:
-            min_bound = max(min_bound, args.minimum_bounds[parameter])
-        static_parameter_bounds[parameter] = (min_bound, max_bound)
-
-    output_timeseries = {
-        channel: TimeSeries(
-            data = np.zeros(n_samples_total, dtype=np.float32),
-            epoch=float(data_file_starts[0]),
-            delta_t=delta_t
-        )
-        for channel in args.output_timeseries_channels
-    }
-
-    
-
-    for idx, (stat, time) in enumerate(zip(coinc_stat, coinc_time)):
-        logger.info("Event %d at time %.1f days with statistic %.3f", idx, time / 86400, stat)
-        # Find data file for this event
-        event_data_file = args.data_files[coinc_chunks[idx]]
-
-        logger.info(f"Using data file {event_data_file} for event at time {time}")
-
-        logger.info("Getting parameters")
-        initial_template_id = coinc_tempid[idx]
-        initial_template = {
-            parameter: bank[parameter][idx]
-            for parameter in _BANK_PARAMETERS
-        }
-        initial_template['coa_phase'] = bank['coa_phase'][idx]
-        initial_template['phi_ref'] = bank['phi_ref'][idx]
-
-        mchirp_init, eta_init = mchirp_eta_from_mass1_mass2(
-            initial_template['mass1'],
-            initial_template['mass2']
-        )
-        # The bank stores mass1/mass2 but the optimiser works in terms of
-        # chirp mass and symmetric mass ratio, so store those derived values
-        # here for use when setting bounds and the initial population.
-        initial_template['mchirp'] = mchirp_init
-        initial_template['eta'] = eta_init
-        # Use the trigger time of the first channel as the coalescence time for
-        # the initial point / optimisation. The other channels are shifted by
-        # their per-channel trigger times when plotting, so that each channel's
-        # waveform peaks at its own trigger time.
-        initial_template['tc'] = float(
-            coinc_times_by_channel[args.optimisation_channels[0]][idx]
-        )
-
-        logger.info("Setting up the initial population of particles for the optimiser")
-
-        # Start from a fresh copy of static bounds for each event so there is no
-        # mutation carried across loop iterations.
-        bounds_this_event = {
-            parameter: static_parameter_bounds[parameter]
-            for parameter in optimiser_parameters
-        }
-        for parameter in optimiser_parameters:
-            if parameter in args.bounds_window_relative_to_initial:
-                event_max_bound = initial_template[parameter] + args.bounds_window_relative_to_initial[parameter]
-                event_min_bound = initial_template[parameter] - args.bounds_window_relative_to_initial[parameter]
-                bounds_this_event[parameter] = (
-                    max(static_parameter_bounds[parameter][0], event_min_bound),
-                    min(static_parameter_bounds[parameter][1], event_max_bound)
-                )
-            elif f"log_{parameter}" in args.bounds_window_relative_to_initial:
-                max_bound_log = np.log10(
-                        initial_template[parameter]
-                    ) + args.bounds_window_relative_to_initial[f"log_{parameter}"]
-
-                min_bound_log = np.log10(
-                    initial_template[parameter]
-                 ) - args.bounds_window_relative_to_initial[f"log_{parameter}"]
-
-                bounds_this_event[parameter] = (
-                    max(static_parameter_bounds[parameter][0], 10 ** min_bound_log),
-                    min(static_parameter_bounds[parameter][1], 10 ** max_bound_log)
-                )
+    def collect(results):
+        # Combine in SNR order so seeded fits and overlapping sums are reproducible.
+        for record, event_epoch, segments in results:
+            offset = round((event_epoch-epoch)/dt)
+            for c, segment in segments.items():
+                signals[c][offset:offset+len(segment)] += segment
+            records.append(record)
+    if args.event_workers>1 and tasks:
+        logger.info('Dispatching events in decreasing SNR order to %d workers; completion order may differ',
+                    args.event_workers)
+        # Spawn workers with independent HDF5 handles and per-event random seeds.
+        with ProcessPoolExecutor(max_workers=min(args.event_workers,len(tasks)),
+                mp_context=get_context('spawn'), initializer=init_logging,
+                initargs=(args.verbose,)) as pool:
+            collect(pool.map(_optimise_event,tasks))
+    else:
+        collect(map(_optimise_event,tasks))
+    if args.output_parameter_file:
+        with h5py.File(args.output_parameter_file,'w') as f:
+            f.attrs.update(optimisation_window_before=args.optimisation_window_before,
+                           optimisation_window_after=args.optimisation_window_after,
+                           tdi_generation=args.tdi_generation, f_upper=args.f_upper,
+                           f_lower_floor=args.f_lower, pre_merger_days=1., taper_seconds=3600.,
+                           initial_position_deg=-140., mode_array=DEFAULT_HM_MODE_ARRAY,
+                           fit_channels=args.fit_channels,local_refinement_max_evaluations=args.polish_evaluations,
+                           event_workers=args.event_workers,particle_workers=args.n_processes,
+                           amplitude_model='positive physical distance; physical coalescence phase')
+            if args.previous_parameter_file:
+                f.attrs['previous_parameter_file'] = args.previous_parameter_file
+            for key in (*PARAMETERS,'mass1','mass2','initial_template_id','initial_stat','optimised_stat',
+                        'distance','amplitude_phase','initial_time','initial_fit_snr','f_lower',
+                        'optimisation_window_start','optimisation_window_end',
+                        'in_previous_window','previous_event_index','polish_evaluations','polish_success'):
+                dtype = bool if key in ('in_previous_window','polish_success') else np.int64 if key in ('initial_template_id','previous_event_index','polish_evaluations') else float
+                f.create_dataset(key,data=np.asarray([r[key] for r in records], dtype=dtype))
+    if args.output_timeseries_file:
+        with h5py.File(args.output_timeseries_file,'w') as f:
+            f.attrs.update(metadata)
+            f.attrs['epoch'],f.attrs['delta_t'] = epoch,dt
+            f.attrs['amplitude_model'] = 'positive physical distance; physical coalescence phase'
+            for c, signal in signals.items():
+                f.create_dataset(c,data=signal)
 
 
-        logger.info("Setting up population for optimiser")
-        rng = np.random.default_rng(seed=args.seed)
-        min_bounds = np.array(
-            [bounds_this_event[p][0] for p in optimiser_parameters]
-        )
-        max_bounds = np.array(
-            [bounds_this_event[p][1] for p in optimiser_parameters]
-        )
-        population = rng.uniform(
-            # Iterate using optimiser_parameters to ensure consistent ordering
-            low=min_bounds,
-            high=max_bounds,
-            size=(args.n_particles, len(optimiser_parameters)),
-        )
-
-        logger.debug(
-            "Making sure that the template itself is in the population by "
-            "overwriting the first point"
-        )
-        population[0] = np.array(
-            [initial_template[p] for p in optimiser_parameters]
-        )
-        for i, p in enumerate(optimiser_parameters):
-            logger.debug(
-                "Parameter %s, initial position: %.6f, bounds: [%.6f, %.6f]",
-                p,
-                population[0, i],
-                min_bounds[i],
-                max_bounds[i]
-            )
-
-        logger.info("Loading and truncating data for this event")
-        with h5py.File(event_data_file, 'r') as data_file:
-
-            data_thismerger = {}
-            for channel in args.optimisation_channels:
-                ts_data = data_file[channel]
-                data_thismerger[channel] = TimeSeries(
-                    ts_data,
-                    epoch=data_file.attrs['epoch'],
-                    delta_t=data_file.attrs['delta_t']
-                )
-                n_samples = len(data_thismerger[channel])
-            delta_t = data_file.attrs['delta_t']
-            tlen = n_samples * delta_t
-        delta_f = 1. / tlen
-        flen = n_samples // 2 + 1
-
-        psd = psd_from_txt(
-            args.psd_file,
-            flen,
-            delta_f,
-            delta_f,
-            is_asd_file=False,
-        )
-        psd.data[0] = np.inf
-        psd.data[1] = np.inf
-
-        waveform_params_shared = {
-            'f_lower': args.f_lower,
-            'low-frequency-cutoff': args.f_lower, 
-            'tdi': args.tdi_generation,
-            't_offset': TIME_OFFSET_20_DEGREES,
-            'cutoff_deltat': 0,
-            't_obs_start': tlen,
-            'delta_f': delta_f,
-            'f_final': 1. / delta_t / 2 + delta_f / 2, # This is a hack to ensure we get the point at f_final returned
-            'approximant':'FastBHB',
-            'mode_array':  DEFAULT_HM_MODE_ARRAY,
-            'length': flen,
-            'tc': tlen
-        }
-
-        logger.info(
-            "Getting SNR for the initial event using time from channel %s",
-            args.optimisation_channels[0]
-        )
-        v_initial_params = np.array([initial_template[p] for p in optimiser_parameters])
-
-        t_coalescence = v_initial_params[7]
-        # The coalescence time (v[7] / this_event_template['tc']) is an absolute
-        # GPS time. Convert it to a time relative to the start of the data segment,
-        # which is what we need to place the merger within the data's frame.
-        coalescence_in_segment = (
-            t_coalescence - float(data_thismerger[args.optimisation_channels[0]].epoch)
-        )
-
-        # Generate the initial template waveform for all output channels.
-        # This is done in exactly the same way as the
-        # matched_filter_search.py search: with tc set to the full data duration so
-        # that the merger sits at the *end* of the waveform vector (see
-        # get_fd_waveform_from_bbhx, which cyclically shifts the merger to the end).
-        # The bank's distance is used so the template amplitude matches the injected
-        # signal in the data.
-        waveform_params_this_event = copy.deepcopy(waveform_params_shared)
-        waveform_params_this_event['coa_phase'] = float(initial_template['coa_phase'])
-        waveform_params_this_event['phi_ref'] = float(initial_template['phi_ref'])
-
-        initial_wf_params = copy.deepcopy(waveform_params_this_event)
-        initial_wf_params.update({
-            "mass1": initial_template['mass1'],
-            "mass2": initial_template['mass2'],
-            "spin1z": initial_template['spin1z'],
-            "spin2z": initial_template['spin2z'],
-            "eclipticlongitude": initial_template['eclipticlongitude'],
-            "eclipticlatitude": initial_template['eclipticlatitude'],
-            "inclination": initial_template['inclination'],
-            "polarization": initial_template['polarization'],
-            "coa_phase": initial_template['coa_phase'],
-            "phi_ref": initial_template['phi_ref'],
-            "tc": tlen,
-            "distance": initial_template['distance']
-        })
-
-
-        initial_wf_fd = get_fd_waveform(
-            **initial_wf_params,
-            ifos=args.output_timeseries_channels, # Generate for all output channels
-        )
-
-        initial_wf_ts, initial_stat, estimated_distance_factor = shift_and_normalise_waveform(
-            initial_wf_fd,
-            coalescence_in_segment,
-            data_thismerger,
-            psd, # This PSD is for the optimisation channels
-            args.optimisation_channels, # Only use optimisation channels for SNR calculation
-            delta_t,
-            args.output_timeseries_channels # Output all specified channels
-        )
-        logger.debug("Cleaning up `initial_wf_fd` after last use")
-        del initial_wf_fd
-
-        logger.info("Initial waveform network SNR: %.3f", initial_stat)
-        logger.info(
-            "Estimated distance factor for initial waveform: %.3f",
-            estimated_distance_factor
-        )
-
-        logger.info("Setting up optimiser")
-        optimizer = ps.single.GlobalBestPSO(
-            n_particles=args.n_particles,
-            dimensions=len(optimiser_parameters),
-            options={'c1': 0.5, 'c2': 0.3, 'w': 0.9},
-            bounds=(min_bounds, max_bounds),
-            init_pos=population,
-        )
-        extra_args = {
-            "data": data_thismerger,
-            "psd": psd,
-            "waveform_params_shared": waveform_params_this_event,
-            "optimisation_channels": args.optimisation_channels # Pass optimisation channels to SNR core
-        }
-
-        minimised_neg_stat, results = optimizer.optimize(
-            compute_minus_network_snr,
-            iters=10,
-            n_processes=None,
-            **extra_args,
-        )
-        logger.debug("Cleaning up `optimizer` after last use")
-        del optimizer
-
-        maximised_stat = -minimised_neg_stat
-        if maximised_stat > initial_stat:
-            logger.info("Statistic increased from %.1f to %.1f", initial_stat, maximised_stat)
-        elif maximised_stat == initial_stat:
-            logger.info("Statistic unchanged from %.1f", initial_stat)
-        else:
-            logger.warning(
-                "Statistic decreased from %.1f to %.1f - this shouldn't happen!",
-                initial_stat,
-                maximised_stat
-            )
-
-        logger.debug(
-            "Maximised template: %s",
-            ", ".join(
-                f"{parameter}: {results[idx]}"
-                for idx, parameter
-                in enumerate(optimiser_parameters)
-            )
-        
-        )
-
-        logger.debug("Getting the maximised template from the results")
-        maximised_template = copy.deepcopy(waveform_params_shared)
-        maximised_template.update({
-            parameter: results[idx]
-            for idx, parameter
-            in enumerate(optimiser_parameters)
-        })
-        maximised_template['coa_phase'] = waveform_params_this_event.get('coa_phase', 0.0)
-        maximised_template['phi_ref'] = waveform_params_this_event.get('phi_ref', 0.0)
-
-        maximised_mass1, maximised_mass2 = mass1_mass2_from_mchirp_eta(
-            maximised_template['mchirp'],
-            maximised_template['eta']
-        )
-        maximised_template['mass1'] = maximised_mass1
-        maximised_template['mass2'] = maximised_mass2
-
-
-        maximised_wf = build_aligned_waveform( # Build waveform for all output channels
-            results,
-            data_thismerger,
-            waveform_params_this_event,
-            raise_err=True,
-            waveform_channels=args.output_timeseries_channels
-        )
-        logger.debug("Cleaning up `results` after last use")
-        del results
-
-        maximised_time_offset = maximised_template['tc'] - float(data_thismerger[args.optimisation_channels[0]].epoch)
-
-        # Capture the actual start time of this event's data file. The per-event
-        # waveform is anchored to this epoch, so we need it later (after
-        # `data_thismerger` has been deleted) to place the waveform at the
-        # correct absolute position within the full-data timeseries.
-        event_data_file_epoch = float(data_thismerger[args.optimisation_channels[0]].epoch)
-
-        maximised_wf_ts, _, maximised_distance_factor = shift_and_normalise_waveform(
-            maximised_wf,
-            maximised_time_offset,
-            data_thismerger,
-            psd,
-            args.optimisation_channels,
-            delta_t,
-            args.output_timeseries_channels
-        )
-        logger.debug("Cleaning up `maximised_wf` and `psd` after last use")
-        del maximised_wf
-        del psd
-        maximised_template['distance'] = maximised_distance_factor
-
-        logger.debug("Cleaning up `initial_wf_ts` and `data_thismerger` after last use")
-        del initial_wf_ts
-        del data_thismerger
-
-
-        optimised_parameters['initial_template_id'].append(int(initial_template_id))
-        optimised_parameters['initial_stat'].append(float(initial_stat))
-        optimised_parameters['optimised_stat'].append(float(maximised_stat))
-
-        for parameter in [
-            'mchirp', 'eta', 'mass1', 'mass2', 'spin1z', 'spin2z',
-            'eclipticlongitude', 'eclipticlatitude', 'inclination', 'tc',
-            'polarization', 'distance'
-        ]:
-            optimised_parameters[parameter].append(float(maximised_template[parameter]))
-        logger.debug("Cleaning up `maximised_template` and `data_thismerger` after last use")
-        del maximised_template
-
-        for channel in args.output_timeseries_channels:
-            logger.debug("Resize and timeshift to the full-data timeseries")
-            maximised_wf_ts[channel].resize(n_samples_total)
-            # Shift by this event's own data-file epoch relative to the start of
-            # the full-data buffer. This is NOT the chunk boundary
-            # (data_file_starts[coinc_chunks[idx]]): a file can begin at an offset
-            # from its chunk boundary (e.g. front padding), so we must anchor on
-            # the actual file epoch to place the event at the correct absolute time.
-            # NB: cyclic_time_shift returns a NEW TimeSeries and does NOT mutate in
-            # place, so the result MUST be captured -- otherwise the shift is
-            # silently discarded and the event is added at the wrong (unshifted)
-            # position within the full-data buffer.
-            maximised_wf_ts[channel] = maximised_wf_ts[channel].cyclic_time_shift(
-                event_data_file_epoch - data_file_starts[0]
-            )
-            maximised_wf_ts[channel].epoch = data_file_starts[0]
-
-        for channel in args.output_timeseries_channels: # Add to all output channels
-            output_timeseries[channel] += maximised_wf_ts[channel]
-
-        logger.debug("Cleaning up `maximised_wf_ts` after last use")
-        del maximised_wf_ts
-        gc.collect()
-
-    if args.output_parameter_file is not None:
-        logger.info("Writing optimised parameters to %s", args.output_parameter_file)
-        with h5py.File(args.output_parameter_file, 'w') as output_parameter_file:
-            for key, vals in optimised_parameters.items():
-                output_parameter_file.create_dataset(key, data=np.array(vals), compression='gzip')
-
-    if args.output_timeseries_file is not None:
-        logger.info("Writing optimised signal timeseries to %s", args.output_timeseries_file)
-        with h5py.File(args.output_timeseries_file, 'w') as output_ts_file:
-            output_ts_file.attrs['epoch'] = float(output_timeseries[args.optimisation_channels[0]].epoch)
-            output_ts_file.attrs['delta_t'] = float(delta_t) # delta_t is consistent across all channels
-            for channel in args.output_timeseries_channels: # Write all output channels
-                output_ts_file.create_dataset(
-                    channel,
-                    data=output_timeseries[channel].data,
-                    compression='gzip',
-                )
-
-    logger.info("Done!")
+if __name__ == '__main__':
+    main()

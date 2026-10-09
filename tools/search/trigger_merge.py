@@ -40,6 +40,8 @@ def main():
     all_tids = []
     all_times = []
     all_snrs = []
+    analysis_intervals = []
+    complete_exposure = True
 
     for trigger_filename in args.trigger_files:
         logger.info("Processing file %s", trigger_filename)
@@ -47,6 +49,10 @@ def main():
             all_tids.append(trigger_file['template_id'][:])
             all_times.append(trigger_file['end_time'][:])
             all_snrs.append(trigger_file['snr'][:])
+            if 'analysis_intervals' in trigger_file.attrs:
+                analysis_intervals.extend(trigger_file.attrs['analysis_intervals'])
+            else:
+                complete_exposure = False
 
     if len(all_tids) == 0:
         raise ValueError("No trigger files provided")
@@ -89,6 +95,8 @@ def main():
     logger.info("Total triggers after clustering: %d", merged_tids.size)
 
     with h5py.File(args.output_file, 'w') as output_file:
+        if complete_exposure:
+            output_file.attrs['analysis_intervals'] = np.asarray(analysis_intervals).reshape(-1, 2)
         n_triggers = merged_tids.size
         tid_ds = output_file.create_dataset(
             "template_id",

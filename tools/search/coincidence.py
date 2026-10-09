@@ -6,6 +6,7 @@ import numpy as np
 from gwaith.io import MultiOptionAction
 
 from hwilas import add_hwilas_common_options, init_logging
+from hwilas.search.rounds import previous_window_flags
 
 
 logger = logging.getLogger(__name__)
@@ -25,8 +26,8 @@ def main():
     parser.add_argument(
         "--coincidence-window",
         type=float,
-        default=7200,
-        help="Window to use when assessing coincidence, in seconds. Default 100"
+        default=3600,
+        help="Channel coincidence tolerance in seconds (±window). Default 3600 (1 hour)"
     )
     parser.add_argument(
         "--output-file",
@@ -39,7 +40,15 @@ def main():
         help="File containing the optimal SNRs / fitting factors for the MBHBs in Sangria dataset"
     )
 
+    parser.add_argument("--cluster-window", type=float, default=86400.,
+                        help="Cluster across templates within this many seconds; default 86400 (1 day)")
+    parser.add_argument("--unclustered-output-file",
+                        help="Optional HDF5 output containing coincidences before event clustering")
+    parser.add_argument("--previous-parameter-file",
+                        help="Flag coincidences within earlier optimisation windows without rejecting them")
     args = parser.parse_args()
+    if min(args.coincidence_window, args.cluster_window) < 0:
+        parser.error("Coincidence and clustering windows must be nonnegative")
 
     init_logging(args.verbose)
 
@@ -75,7 +84,7 @@ def main():
     }
     for channel in channels:
         coincident_triggers.update({
-            f"time_{channel}": np.empty(INITIAL_COINC_SIZE, dtype=np.float32),
+            f"time_{channel}": np.empty(INITIAL_COINC_SIZE, dtype=np.float64),
             f"snr_{channel}": np.empty(INITIAL_COINC_SIZE, dtype=np.float32),
             f"trigger_id_{channel}": np.empty(INITIAL_COINC_SIZE, dtype=np.int32),
         })
@@ -97,7 +106,7 @@ def main():
 
     # Loop through the template IDs and make coincidence
     for template_idx in shared_template_ids:
-        logger.info("Processing template %d", template_idx)
+        logger.debug("Processing template %d", template_idx)
 
         indices_0 = np.where(triggers[channels[0]]['template_id'] == template_idx)[0]
         indices_1 = np.where(triggers[channels[1]]['template_id'] == template_idx)[0]
@@ -105,6 +114,7 @@ def main():
         if not indices_0.size or not indices_1.size:
             continue
 
+        indices_1 = indices_1[np.argsort(triggers[channels[1]]["end_time"][indices_1])]
         trigger_times_0 = triggers[channels[0]]['end_time'][indices_0]
         trigger_times_1 = triggers[channels[1]]['end_time'][indices_1]
         trigger_snrs_0 = triggers[channels[0]]['snr'][indices_0]
@@ -114,7 +124,9 @@ def main():
             left = np.searchsorted(trigger_times_1, time_0 - args.coincidence_window)
             right = np.searchsorted(trigger_times_1, time_0 + args.coincidence_window)
 
-            if (right - left) == 1:
+            if right > left:
+                # Retain the loudest compatible partner when several triggers match.
+                left += int(np.argmax(trigger_snrs_1[left:right]))
                 # Coincident triggers!
                 logger.debug(
                     "Trigger at time %.1f in channel %s is within "
@@ -144,14 +156,6 @@ def main():
                 coincident_triggers[f'snr_{channels[1]}'][n_coincs] = trigger_snrs_1[left]
                 n_coincs += 1
 
-            elif (right - left) > 1:
-                # This case is not handled yet.
-                # It means multiple triggers from channel 1 fall within the
-                # window of a single trigger from channel 0.
-                raise RuntimeError(
-                    "Multiple triggers found within the coincidence window"
-                )
-
     # Trim arrays to the actual number of coincidences
     for key in coincident_triggers:
         coincident_triggers[key] = coincident_triggers[key][:n_coincs]
@@ -160,6 +164,19 @@ def main():
         "Found %d coincident triggers",
         n_coincs
     )
+
+    if args.previous_parameter_file:
+        times = (coincident_triggers[f'time_{channels[0]}']+coincident_triggers[f'time_{channels[1]}'])/2
+        flags, previous_ids = previous_window_flags(times, args.previous_parameter_file)
+        coincident_triggers['in_previous_window'] = flags
+        coincident_triggers['previous_event_index'] = previous_ids
+        logger.info('%d coincidences flagged within earlier optimisation windows', flags.sum())
+
+    if args.unclustered_output_file:
+        logger.info("Saving %d unclustered coincidences to %s", n_coincs, args.unclustered_output_file)
+        with h5py.File(args.unclustered_output_file, 'w') as f:
+            for key, value in coincident_triggers.items():
+                f.create_dataset(key, data=value, compression='gzip')
 
     # Now lets do some clustering - cluster by qstatistic
     # For now the statistic is the quadratic sum of SNRs
@@ -186,7 +203,7 @@ def main():
         coinc_idx = indices[sorted_coinc_idx]
         if not keep[coinc_idx]:
             continue
-        within_window = np.abs(coinc_time - coinc_time[coinc_idx]) < args.coincidence_window
+        within_window = np.abs(coinc_time - coinc_time[coinc_idx]) < args.cluster_window
         keep[within_window] = False
         keep[coinc_idx] = True
 

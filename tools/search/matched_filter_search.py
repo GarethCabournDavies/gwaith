@@ -7,20 +7,18 @@ import argparse  # Library for parsing command-line arguments
 import logging  # Library for logging messages
 import h5py  # Library for interacting with HDF5 files
 import numpy as np
+from tqdm.auto import tqdm
 
-from scipy.signal import find_peaks
+from scipy.signal import find_peaks, detrend
+from scipy.signal.windows import tukey
+from scipy.fft import next_fast_len
 from gwaith.types import TimeSeries, FrequencySeries
 
 from hwilas import add_hwilas_common_options, init_logging
 from hwilas.filter import matched_filter_frequencyseries
 from hwilas.psd.read import from_txt as psd_from_txt
 from hwilas.template_banks.helpers import waveform_from_bank
-from hwilas.waveforms.constants import TIME_OFFSET_20_DEGREES
-from hwilas.waveforms import (
-    FASTBHB_CHANNELS,
-    get_fd_waveform,
-)
-from hwilas.waveforms.unified_generation import generate_waveform
+from hwilas.waveforms.short_fastbhb import short_template
 
 logger = logging.getLogger(__name__)
 
@@ -111,14 +109,12 @@ def main():
                             " PART/NUM_PARTS")
 
     def parse_template_range(num_templates, rangestr):
-        part = int(rangestr.split('/')[0])
-        pieces = int(rangestr.split('/')[1])
+        part, pieces = map(int, rangestr.split("/"))
+        if pieces <= 0 or not 0 <= part < pieces:
+            raise ValueError("Template fraction must be PART/NUM_PARTS with 0 <= PART < NUM_PARTS")
         tmin = int(num_templates / float(pieces) * part)
         tmax = int(num_templates / float(pieces) * (part+1))
         return tmin, tmax
-
-    # Add argument for the lower frequency cutoff with a default value
-    parser.add_argument('--f-lower', type=float, default=1e-6)
 
     parser.add_argument(
         "--output-file",
@@ -133,7 +129,11 @@ def main():
         help="Directory to optionally save plots of the SNR timeseries for each processed template."
     )
 
+    parser.add_argument("--f-upper", type=float, default=0.09)
+
     # Parse the command-line arguments provided by the user
+    parser.add_argument("--end-exclusion",type=float,default=259200.,
+                        help="Discard this many seconds before filtering, in addition to template edge support; default 3 days")
     args = parser.parse_args()
 
     init_logging(args.verbose)
@@ -143,6 +143,8 @@ def main():
     # First, load in the data. Get from the file the information on when it starts, its length and its delta t
     # The input is a sangria dataset read directly from an HDF5 file.
     with h5py.File(args.input_data_file, 'r') as data_file:
+        fractional_frequency = bool(data_file.attrs.get("divide_by_laser_frequency", False))
+        laser_frequency = float(data_file.attrs.get("laser_frequency", 2.816e14))
         data_epoch = data_file.attrs['epoch']
         delta_t = data_file.attrs['delta_t']
         data = TimeSeries(
@@ -151,6 +153,8 @@ def main():
             epoch=data_epoch,
         )
         padding_duration_from_file = float(data_file.attrs.get('padding_duration', 0.0))
+        stored_analysis_start = data_file.attrs.get('analysis_start_time')
+        stored_analysis_end = data_file.attrs.get('analysis_end_time')
 
     original_dlen = len(data)
     tlen = original_dlen * delta_t
@@ -168,11 +172,9 @@ def main():
         requested_start_time = float(args.start_time)
         requested_end_time = float(args.end_time)
     else:
-        # The data is asymmetrically padded, with the padding at the end.
-        # The analysis window is from the start of the data to the start
-        # of the padding.
-        requested_start_time = data_start_time
-        requested_end_time = data_end_time - padding_duration_from_file
+        # Stored bounds exclude inpainted padding while retaining original times.
+        requested_start_time = float(stored_analysis_start) if stored_analysis_start is not None else data_start_time
+        requested_end_time = float(stored_analysis_end) if stored_analysis_end is not None else data_end_time - padding_duration_from_file
 
     valid_start_time = max(requested_start_time, data_start_time)
     valid_end_time = min(requested_end_time, data_end_time)
@@ -191,49 +193,39 @@ def main():
     # valid_data_start = max(args.start_time, data_start_time + padding_duration)
     # valid_data_end = min(args.end_time, data_end_time + padding_duration)
 
-    # Ensure data has an odd length to avoid FFT length mismatches
-    if len(data) % 2 == 0:
-        data.resize(len(data) + 1)
+    if args.channel not in ("LISA_A", "LISA_E"):
+        raise ValueError("Short templates support LISA_A/E")
+    if not 0 < args.f_upper < .5/delta_t:
+        raise ValueError("Short-template band must lie inside Nyquist")
+    # Require the full two-day template buffer to lie inside the real data.
+    edge = max(args.padding_time, 2*86400.)
+    valid_start_time = max(valid_start_time, data_start_time+edge)
+    if args.end_exclusion < 0:
+        raise ValueError("End exclusion must be nonnegative")
+    working_dlen = original_dlen-int(np.ceil(args.end_exclusion/delta_t))
+    usable_end_time = data_start_time+working_dlen*delta_t
+    valid_end_time = min(valid_end_time, usable_end_time-edge)
+    if valid_end_time <= valid_start_time:
+        raise ValueError("Data are too short after excluding template edge support")
+    logger.info("Retaining data through %.0f; valid trigger end %.0f",usable_end_time,valid_end_time)
+    logger.debug("Discarding the end before tapering and Fourier transforming")
+    retained = data.data[:working_dlen]
+    win = tukey(working_dlen, alpha=min(1., 2*86400/(working_dlen*delta_t)))
+    data = TimeSeries(detrend(retained)*win, epoch=data_epoch, delta_t=delta_t)
+
+    # Separate the real-data boundaries by a full template buffer in the FFT.
+    fft_length = next_fast_len(working_dlen+int(np.ceil(2*86400/delta_t)))
+    logger.debug("FFT padding: %d samples (%g days)",
+                 fft_length-working_dlen, (fft_length-working_dlen)*delta_t/86400.)
+    data.resize(fft_length)
 
     padded_dlen = len(data)
     tlen = padded_dlen * delta_t
     delta_f = 1. / tlen
     flen = len(data) // 2 + 1
 
-    # Set the defaults required for the waveform parameters.
-    # Use the final (possibly padded) data length so FFT sizes are consistent.
-    approximant = 'FastBHB'
-    # The FastBHB time-domain generator returns a *time-series* of ``length``
-    # samples spanning [start_time, start_time + length * delta_t). Its frequency
-    # resolution must match the data's delta_f, so ``length`` is the number of time
-    # samples (padded_dlen), not the FFT bin count (flen).
-    wf_length = int(padded_dlen)
-
-    waveform_params_shared = {
-        'f_lower': args.f_lower,
-        'low-frequency-cutoff': 1e-6,
-        'tdi': args.tdi_generation,
-        't_offset': TIME_OFFSET_20_DEGREES,
-        'cutoff_deltat': 0,
-        't_obs_start': tlen,
-        'delta_f': delta_f,
-        'f_final': 1. / delta_t / 2 + delta_f / 2, # This is a hack to ensure we get the point at f_final returned
-        'approximant': approximant,
-        'mode_array': [(2, 2)],
-        'length': wf_length,
-        'tc': tlen - 86400.0,
-        # True data sampling interval (seconds). Used to build the detector-frame
-        # time grid; without it the grid would be derived from the FFT parameters
-        # and could mismatch the data.
-        'delta_t': delta_t,
-    }
-
-    # The FastBHB time-domain generator returns AET channels (LISA_A/E/T).
-    if args.channel not in FASTBHB_CHANNELS:
-        raise ValueError(
-            f"Channel {args.channel} is not a FastBHB AET channel. "
-            f"Expected one of {FASTBHB_CHANNELS}."
-        )
+    # Intrinsic parameters, phase and modes are read by the shared bank helper.
+    waveform_params_shared = {'tc': 2*86400., 'delta_t': delta_t}
 
     logger.info("Loading PSD")
     psd = psd_from_txt(
@@ -254,7 +246,9 @@ def main():
     psd.data[0] = np.inf
     psd.data[1] = np.inf
 
-    data_fs = data.to_frequencyseries()
+    # Explicit continuous Fourier scaling is independent of GWAITH version.
+    data_fs = FrequencySeries(delta_t * np.fft.rfft(data.data),
+                              delta_f=delta_f, epoch=float(data.epoch))
 
     logger.info("Beginning filtering with bank %s", args.bank_file)
 
@@ -276,8 +270,9 @@ def main():
     logger.info("Using template range %d to %d out of %d", tmin, tmax, num_templates)
 
     with h5py.File(args.bank_file, 'r') as bank_file:
-        for template_idx in range(tmin, tmax):
-            logger.info("Processing template %d", template_idx)
+        for template_idx in tqdm(range(tmin, tmax), desc=f"Templates {args.channel} {args.template_fraction_range}", unit="template",
+                                 position=int(args.template_fraction_range.split("/")[0]), dynamic_ncols=True):
+            logger.debug("Processing template %d", template_idx)
             bank_wf_params = waveform_from_bank(
                 bank_file,
                 template_idx,
@@ -287,36 +282,27 @@ def main():
 
             logger.debug('Getting waveform')
 
-            # NOTE: This uses get_fd_waveform directly rather than the unified
-            # generate_waveform() interface used in plotting scripts. This is because
-            # matched filter search works with template banks (where parameters are
-            # pre-built by waveform_from_bank) rather than catalog entries.
-            # Both paths handle waveform generation identically; the unified interface
-            # is primarily designed for catalog-based workflows.
-            # The waveform is generated in the time domain (see get_fd_waveform)
-            # so that it can be (over)whitened before the template loop. It is
-            # converted back to the frequency domain here for matched filtering.
-            # ``get_fd_waveform`` dispatches on the approximant: BBHx returns AET
-            # channels while the PhenomX time-domain path returns XYZ channels, so
-            # the requested channel must match the chosen waveform type (validated
-            # above).
-            waveform = get_fd_waveform(
-                ifos=[args.channel], **bank_wf_params
-            )
-
-            # The waveform is generated with tc shifted earlier (by 1 day) to
-            # prevent the lisabeta boundary crash. A frequency-domain phase shift
-            # rolls the merger time back to the end of the data (tlen), so the SNR
-            # timeseries peak times are correct.
-            wf_fs = waveform[args.channel].to_frequencyseries()
-            freqs = np.asarray(wf_fs.sample_frequencies)
-            
-            # Shifting the template backwards in time by dt corresponds to
-            # multiplying by exp(+2j * pi * f * dt) in frequency domain for our convention,
-            # but we want to shift the effective merger *forward* by 86400s (so it occurs later).
-            # A forward shift of the template by dt means h(t - dt), which in FD is exp(-2j*pi*f*dt).
-            wf_fs.data *= np.exp(-2j * np.pi * freqs * 86400.0)
-
+            f_lower = float(bank_file['f_lower'][template_idx])
+            if not 0 < f_lower < args.f_upper:
+                raise ValueError(f"Invalid bank f_lower for template {template_idx}: {f_lower}")
+            logger.debug("Template %d lower frequency: %g Hz", template_idx, f_lower)
+            settings = dict(delta_t=delta_t, initial_position_deg=-140.,
+                            f_lower=f_lower, f_upper=args.f_upper, tdi=args.tdi_generation,
+                            laser_frequency=1. if fractional_frequency else laser_frequency,
+                            pre_merger_days=1., taper_seconds=3600.)
+            # Fixed response epoch; phase/amplitude maximisation is per channel.
+            params = {**bank_wf_params, "tc": 2*86400.}
+            short = short_template(params, settings, modes=[(2, 2)])[args.channel]
+            template_duration = len(short)*delta_t
+            template_start = max(valid_start_time, data_start_time+template_duration)
+            template_end = min(valid_end_time, data_end_time-template_duration)
+            logger.debug("Template %d valid trigger interval: %g to %g",
+                         template_idx, template_start, template_end)
+            h = np.pad(short, (0, len(data)-len(short)))
+            frequencies = np.arange(flen)*delta_f
+            # Place the template merger at cyclic time zero, so lag is arrival time.
+            wf_fs = FrequencySeries(delta_t*np.fft.rfft(h)*np.exp(2j*np.pi*frequencies*1.5*86400.),
+                                    delta_f=delta_f, epoch=float(data.epoch))
             logger.debug('Computing SNR')
             snr_ts = matched_filter_frequencyseries(
                 wf_fs,
@@ -324,12 +310,14 @@ def main():
                 psd=psd,
                 n_samples=len(data),
                 epoch=float(data.epoch),
+                low_frequency_cutoff=f_lower,
+                high_frequency_cutoff=args.f_upper,
             )
 
             # Restrict to a contiguous valid time interval by truncation.
             # This avoids artificially flat zero regions in diagnostic plots.
-            start_idx = int(np.ceil((valid_start_time - float(snr_ts.epoch)) / delta_t))
-            end_idx = int(np.floor((valid_end_time - float(snr_ts.epoch)) / delta_t)) + 1
+            start_idx = int(np.ceil((template_start - float(snr_ts.epoch)) / delta_t))
+            end_idx = int(np.floor((template_end - float(snr_ts.epoch)) / delta_t)) + 1
             start_idx = max(0, start_idx)
             end_idx = min(len(snr_ts), end_idx)
 
@@ -344,7 +332,7 @@ def main():
 
             snr_times = np.asarray(snr_ts.sample_times)[start_idx:end_idx]
             snr_data = np.asarray(snr_ts.data)[start_idx:end_idx]
-            
+
             # Find peaks in the SNR timeseries
             clustered_indices, _ = find_peaks(
                 abs(snr_data),
@@ -366,7 +354,7 @@ def main():
                 from matplotlib import use
                 use('Agg')
                 from matplotlib import pyplot as plt
-                
+
                 os.makedirs(args.plot_snr_dir, exist_ok=True)
                 fig, ax = plt.subplots(figsize=(14, 5))
                 ax.plot(snr_times / 86400.0, abs(snr_data))
@@ -381,7 +369,7 @@ def main():
                 if args.snr_threshold is not None:
                     ax.axhline(args.snr_threshold, color='r', linestyle='--', label=f'Threshold ({args.snr_threshold})')
                     ax.legend()
-                    
+
                 ax.set_xlabel('Time (days)')
                 ax.set_ylabel('SNR')
                 ax.set_title(f"Template {template_idx} ({args.channel})")
@@ -399,7 +387,7 @@ def main():
             output_triggers['snr'] += snrs_out.tolist()
 
     output_triggers['template_id'] = np.array(output_triggers['template_id'], dtype=np.int32)
-    output_triggers['end_time'] = np.array(output_triggers['end_time'], dtype=np.float32)
+    output_triggers['end_time'] = np.array(output_triggers['end_time'], dtype=np.float64)
     output_triggers['snr'] = np.array(output_triggers['snr'], dtype=np.float32)
 
     # Summarise which templates are absent from the output file. A template is
@@ -425,6 +413,7 @@ def main():
 
     logger.info("Outputting to file")
     with h5py.File(args.output_file, 'w') as output_trigger_file:
+        output_trigger_file.attrs['analysis_intervals'] = [[valid_start_time, valid_end_time]]
         for key, value in output_triggers.items():
             output_trigger_file.create_dataset(
                 key,

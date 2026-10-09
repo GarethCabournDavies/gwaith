@@ -37,5 +37,4 @@ hwilas_matched_filter_search \
   --output-file "${OUTPUT_FILE}" \
   --template-fraction-range "${TASK_ID}/${TEMPLATE_PARALLELIZATION}" \
   --waveform-type "${WAVEFORM_TYPE}" \
-  --tdi-generation "${TDI_GENERATION}" \
-  --f-lower 1e-5
+  --tdi-generation "${TDI_GENERATION}"

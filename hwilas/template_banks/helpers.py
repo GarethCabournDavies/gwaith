@@ -84,7 +84,7 @@ def waveform_from_bank(bank_file, idx, waveform_params_shared, data_length):
     bank_wf["mode_array"] = parse_mode_array(temp_params)['mode_array']
 
     bank_wf['f_ref'] = max(
-        getattr(waveform_params_shared, 'f_ref', 0),
+        waveform_params_shared.get('f_ref', 0),
         bank_file['f_lower'][idx]
     )
 

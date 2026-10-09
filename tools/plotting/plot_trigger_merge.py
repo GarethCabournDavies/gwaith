@@ -99,15 +99,9 @@ def _plot_truth_overlay(ax, truth):
     tc = truth.coalescence_times()
     if len(tc) == 0:
         return
-    ax.vlines(
-        tc / 86400.0,
-        ax.get_ylim()[0],
-        ax.get_ylim()[1],
-        color='r',
-        linestyle='--',
-        alpha=0.5,
-        zorder=999,
-    )
+    for time in tc:
+        ax.axvline(time / 86400.0, color='r', linestyle='--', alpha=0.5,
+                   zorder=0)
     handles = [plt.Line2D([0], [0], color='r', linestyle='--', label=f"Truth ({truth.source_group})")]
     ax.legend(handles=ax.get_legend_handles_labels()[0] + handles)
 

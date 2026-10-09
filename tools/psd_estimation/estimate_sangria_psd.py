@@ -158,7 +158,11 @@ def main():
     for channel in channels:
         output_path = args.output_file[channel]
         logger.debug("Saving PSD for %s to %s", channel, output_path)
-        psds[channel].save(output_path)
+        # Downstream PSD readers expect frequency/PSD columns in plain text.
+        np.savetxt(output_path,
+                   np.column_stack((np.asarray(psds[channel].sample_frequencies),
+                                    np.asarray(psds[channel].data))),
+                   header="frequency_Hz PSD")
 
     logger.info("Done!")
 

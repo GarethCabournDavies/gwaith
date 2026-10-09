@@ -89,7 +89,7 @@ def gate_and_paint(
         src_freqs: np.ndarray = (np.arange(n_src) * psd.delta_f)[:len(psd_data)]
         # Target frequency axis covering [0, Nyquist] with rfft_len bins.
         target_freqs: npt.NDArray[np.float64] = (
-            np.linspace(0.0, sampling_rate_hz / 2.0, rfft_len)
+            np.fft.rfftfreq(num_samples, d=1.0 / sampling_rate_hz)
         )
         psd_data = np.interp(target_freqs, src_freqs, psd_data)
 

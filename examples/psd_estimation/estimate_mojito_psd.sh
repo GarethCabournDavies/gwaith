@@ -6,9 +6,7 @@
 # Multiple chunk files can be given; each channel is concatenated across all
 # chunks before Welch's method is applied, giving a much smoother estimate.
 
-MOJITO_PROCESSED_DATA=(
-  ../plots/mojito/mojito_data_aet.hdf
-)
+MOJITO_PROCESSED_DATA="../data_processing/mojito_all_downsampled.hdf"
 
 mkdir -p output
 

@@ -97,7 +97,7 @@ def _get_lisa_orbits(initial_position_rad=MOJITO_INITIAL_POSITION_RAD):
         (:data:`MOJITO_INITIAL_POSITION_RAD`).
     """
     global _analytic_orbits
-    if _analytic_orbits is None:
+    if _analytic_orbits is None or not np.isclose(float(_analytic_orbits.initial_position), initial_position_rad):
         _analytic_orbits = orbits.Orbits.type(dict({
             "nominal_arm_length": 2.5e9 * un.m,
             "initial_rotation": 0 * un.rad,
@@ -167,7 +167,10 @@ def _build_ldc_template(params):
         # No projection: Spin1/Spin2 should be the line-of-sight magnitude.
         for body in ('1', '2'):
             components = [template[f'Spin{body}{c}'] for c in ('x', 'y', 'z')]
-            template[f'Spin{body}'] = float(np.sqrt(sum(c * c for c in components)))
+            if components[0] == 0.0 and components[1] == 0.0:
+                template[f'Spin{body}'] = components[2]
+            else:
+                template[f'Spin{body}'] = float(np.sqrt(sum(c * c for c in components)))
 
     template['Cadence'] = float(params.get('delta_t', 5.0))
 
@@ -184,7 +187,10 @@ def _build_ldc_template(params):
     # fields so that ``rename_as_lisabeta`` performs the proper
     # ``aziPolAngleL2PsiIncl`` transformation whenever inclination/polarization
     # are provided.
-    if 'inclination' in params and 'polarization' in params:
+    if params.get('angle_convention', 'catalogue') == 'fastbhb':
+        template['Inclination'] = float(params.get('inclination', 0.0))
+        template['Polarization'] = float(params.get('polarization', 0.0))
+    elif 'inclination' in params and 'polarization' in params:
         template['InitialPolarAngleL'] = float(params['inclination'])
         template['InitialAzimuthalAngleL'] = float(params['polarization'])
         template['PolarAngleOfSpin1'] = float(params.get('spin1_polar_angle', 0.0))
@@ -253,7 +259,7 @@ def get_td_waveform_from_fastbhb(
         T=end_time,
         delta_t=delta_t,
         orbits=_get_lisa_orbits(),
-        modes=DEFAULT_FASTBHB_MODES,
+        modes=params.get('mode_array', DEFAULT_FASTBHB_MODES),
     )
 
     template = _build_ldc_template(params)

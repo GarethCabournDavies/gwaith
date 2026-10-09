@@ -15,6 +15,7 @@ import numpy as np
 from gwaith.types import TimeSeries, FrequencySeries
 
 from hwilas import add_hwilas_common_options, init_logging
+from hwilas.types import KeyValueAction
 from hwilas.data_processing.inpainting import gate_and_paint
 from hwilas.psd.read import from_txt as psd_from_txt
 
@@ -59,7 +60,7 @@ def main():
         "--padding-duration",
         type=float,
         default=30 * 86400,
-        help="Duration of padded section to add to the end of the data (seconds). Default: 30 days."
+        help="Padding duration per selected end (seconds). Default: 30 days."
     )
     parser.add_argument(
         "--analysis-start-time",
@@ -91,11 +92,18 @@ def main():
     )
     parser.add_argument(
         "--psd-file",
-        required=True,
         help="File to define the PSD"
     )
 
+    parser.add_argument("--padding-side", choices=["start", "end", "both"], default="end",
+                        help="Where to add padding; with both, duration is added at EACH end")
+    parser.add_argument("--psd-files", nargs="+", action=KeyValueAction,
+                        help="Channel-specific PSD files as channel:filename pairs")
     args = parser.parse_args()
+    if args.padding_duration < 0:
+        parser.error("padding-duration must be nonnegative")
+    if args.psd_file is None and args.psd_files is None:
+        parser.error("Provide --psd-file or --psd-files")
 
     init_logging(args.verbose)
 
@@ -136,6 +144,9 @@ def main():
         analysis_end_time = data_end_time
         analysis_duration = data_tlen
 
+    if analysis_duration <= 0:
+        raise ValueError("Analysis interval must be nonempty")
+
     if data_tlen > analysis_duration:
         # Cut the data down to just the analysis start / end period
         analysis_start_idx = int((analysis_start_time - data_start_time) / delta_t)
@@ -158,35 +169,29 @@ def main():
         analysis_end_time
     )
 
-    logger.info("Padding Data")
-    # The total duration of the output padded data file
-    padded_tlen = analysis_duration + args.padding_duration
+    logger.info("Padding whole analysis interval at %s", args.padding_side)
     original_dlen = len(data[args.channels[0]])
-    padding_idxlen = int(args.padding_duration / delta_t)
-    padded_dlen = int(padded_tlen / delta_t)
-
+    if any(len(data[c]) != original_dlen for c in args.channels):
+        raise ValueError("Selected channels must have equal lengths")
+    padding_idxlen = round(args.padding_duration / delta_t)
+    if not np.isclose(padding_idxlen * delta_t, args.padding_duration):
+        raise ValueError("Padding duration must be a whole number of samples")
+    left = padding_idxlen if args.padding_side in ("start", "both") else 0
+    right = padding_idxlen if args.padding_side in ("end", "both") else 0
+    output_epoch = float(data[args.channels[0]].epoch) - left * delta_t
     for channel in args.channels:
-        data[channel].resize(padded_dlen)
-
-    logger.info("Loading PSD")
-
-    # Determine the PSD for the inpainting regions.
-    # The inpainting function `gate_and_paint` expects a PSD that matches the length
-    # of the data it's operating on.
+        data[channel] = TimeSeries(np.pad(data[channel].data, (left, right)),
+                                   epoch=output_epoch, delta_t=delta_t)
+    padded_dlen = original_dlen + left + right
     padded_flen = padded_dlen // 2 + 1
-    padded_delta_f = 1. / padded_tlen
-
-    inpainting_psd = psd_from_txt(
-        args.psd_file,
-        padded_flen,
-        padded_delta_f,
-        padded_delta_f,
-        is_asd_file=False,
-    )
-
-    # Define the "gaps" (padding) at the start / end of the data
-    gap_indices_start = [original_dlen]
-    gap_indices_end = [padded_dlen]
+    padded_delta_f = 1. / (padded_dlen * delta_t)
+    gap_indices_start, gap_indices_end = [], []
+    if left:
+        gap_indices_start.append(0)
+        gap_indices_end.append(left)
+    if right:
+        gap_indices_start.append(left + original_dlen)
+        gap_indices_end.append(padded_dlen)
 
     if args.gaps is not None:
         for start, end in args.gaps:
@@ -197,6 +202,12 @@ def main():
 
     for channel in args.channels:
         logger.info(f"Applying inpainting to padded + gated sections in channel {channel}")
+        psd_path = args.psd_files.get(channel) if args.psd_files else args.psd_file
+        if psd_path is None:
+            raise ValueError(f"Missing PSD file for {channel}")
+        logger.debug("Reading %s PSD from %s", channel, psd_path)
+        inpainting_psd = psd_from_txt(psd_path, padded_flen, padded_delta_f,
+                                     padded_delta_f, is_asd_file=False)
         data[channel] = gate_and_paint(
             data[channel],
             gap_indices_start,
@@ -207,6 +218,9 @@ def main():
     logger.info("Saving data to %s", args.output_file)
 
     with h5py.File(args.output_file, 'w') as f:
+        with h5py.File(args.data_file, "r") as source:
+            for key, value in source.attrs.items():
+                f.attrs[key] = value
         f.attrs["epoch"] = float(data[args.channels[0]].epoch)
         f.attrs["delta_t"] = float(delta_t)
         for channel in args.channels:
@@ -219,6 +233,10 @@ def main():
             f.attrs["gap_starts"] = gap_starts
             f.attrs["gap_ends"] = gap_ends
         f.attrs["padding_duration"] = args.padding_duration
+        f.attrs["padding_start_duration"] = left * delta_t
+        f.attrs["padding_end_duration"] = right * delta_t
+        f.attrs["analysis_start_time"] = float(analysis_start_time)
+        f.attrs["analysis_end_time"] = float(analysis_start_time) + original_dlen * delta_t
 
 
     logger.info("Done")

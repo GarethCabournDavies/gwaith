@@ -196,7 +196,7 @@ def main():
         raw_data,
         channels=needed_tdis,
         downsample_kwargs={"target_fs": target_fs, "kaiser_window": 31.0},
-        filter_kwargs={"highpass_cutoff": args.low_cutoff_frequency, "lowpass_cutoff": 0.8 * target_fs, "order": 2},
+        filter_kwargs={"highpass_cutoff": args.low_cutoff_frequency, "lowpass_cutoff": 0.4 * target_fs, "order": 2},
         trim_kwargs={"fraction": 0.0},
         truncate_kwargs={"days": args.truncate_days},
         window_kwargs={"window": "tukey", "alpha": 0.0125},

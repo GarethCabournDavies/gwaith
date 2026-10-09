@@ -5,7 +5,7 @@ PhenomXPy generators have been removed from the project; FastBHB is the only
 supported path.
 """
 
-from .fastbhb import FASTBHB_CHANNELS, get_td_waveform_from_fastbhb
+FASTBHB_CHANNELS = ('LISA_A', 'LISA_E', 'LISA_T')
 from .constants import AET_CHANNELS, LISA_CHANNELS
 import numpy as np
 from gwaith.types import FrequencySeries
@@ -48,6 +48,7 @@ def get_fd_waveform(
         to TimeSeries.
     """
     if approximant.lower() in FASTBHB_APPROXIMANTS:
+        from .fastbhb import get_td_waveform_from_fastbhb
         # The FastBHB generator needs a detector-frame sampling grid. If the
         # caller did not supply an explicit window (start_time/end_time),
         # derive one from the shared FFT parameters: ``delta_t`` is used
