@@ -1,24 +1,13 @@
-set -e
+#!/usr/bin/env bash
+set -euo pipefail
 
 mkdir -p output
 
-python ./pycbc_brute_bank \
-    --verbose \
-    --minimal-match 0.9 \
-    --tolerance .05 \
-    --buffer-length 2592000 \
-    --sample-rate .2 \
-    --approximant BBHX_PhenomD \
-    --tau0-threshold 100000 \
-    --tau0-crawl 20000000 \
-    --tau0-start 0 \
-    --tau0-end  20000000 \
-    --tau0-cutoff-frequency 0.0001 \
-    --input-config config.ini \
+hwilas_make_stochastic_bank \
+    --config sangria_bank.toml \
+    --nproc 4 \
     --seed 1 \
-    --output-file output/sangria_bank.hdf \
-    --psd-file ../psd_estimation/output/A_sangria_hm_SMOOTHED_PSD.txt \
-    --low-frequency-cutoff .000001
+    --verbose
 
 hwilas_plot_bank \
   --bank-file output/sangria_bank.hdf \

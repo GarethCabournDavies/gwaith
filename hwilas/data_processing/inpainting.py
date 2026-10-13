@@ -66,8 +66,7 @@ def gate_and_paint(
         # Ensure we return a numpy array copy, even if input_data was a TimeSeries
         return input_data.copy()
 
-    # 2. Prepare for whitening operation (C^-1)
-    # The whitening operator in Fourier domain is 1/PSD.
+    # Apply inverse covariance (overwhitening), whose Fourier weight is 1/PSD.
     # We handle potential infinities in the PSD (where 1/inf -> 0).
     #
     # The FFT of a length-`num_samples` real signal has exactly
@@ -93,8 +92,9 @@ def gate_and_paint(
         )
         psd_data = np.interp(target_freqs, src_freqs, psd_data)
 
-    inv_psd_values: npt.NDArray[np.float64] = 1.0 / (psd_data ** 2)
-    inv_psd_values[~np.isfinite(inv_psd_values)] = 0.0
+    inv_psd_values: npt.NDArray[np.float64] = np.zeros_like(psd_data)
+    valid_psd = np.isfinite(psd_data) & (psd_data > 0)
+    np.divide(1.0, psd_data, out=inv_psd_values, where=valid_psd)
 
     def whiten_and_mask(input_vector: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
         """Applies the C^-1 operator and returns the result in the gaps."""

@@ -1,5 +1,5 @@
 # Paths are relative to this file. Angles are radians; masses are SSB/detector-frame solar masses.
-# Placement uses FastBHB IMRPhenomHM, TDI-2, (2,2), with a one-day inspiral.
+# Placement uses FastBHB IMRPhenomHM, TDI-2, (2,2), retaining 99% of A/E SNR.
 [waveform]
 delta_t = 4.0
 initial_position_deg = -140.0
@@ -7,7 +7,7 @@ laser_frequency = 2.816e14
 # Minimum analysis frequency; each template start frequency is calculated separately.
 f_lower = 0.00003
 f_upper = 0.09
-pre_merger_days = 1.0
+snr_fraction = 0.99
 taper_seconds = 3600.0
 
 [bank]

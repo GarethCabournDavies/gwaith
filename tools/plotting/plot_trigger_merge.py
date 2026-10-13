@@ -9,12 +9,13 @@ Example::
     python tools/plotting/plot_trigger_merge.py \
         --trigger-file output/trigger_merge/trigger_merge_A.hdf \
         --channel LISA_A \
-        --output-directory plots/trigger_merge
+        --output plots/trigger_merge.png
 """
 
 import argparse
 import logging
 
+from hwilas.search.statistics import canonical_statistics, read_statistic
 import h5py
 import numpy as np
 
@@ -38,13 +39,17 @@ def load_arguments():
     parser.add_argument(
         "--trigger-file",
         required=True,
-        help="HDF5 file of merged triggers (template_id, end_time, snr)"
+        help="HDF5 file of merged triggers (template_id, end_time, statistic)"
     )
     parser.add_argument(
         "--channel",
         default=None,
         help="Channel label used only for the plot title"
     )
+    parser.add_argument('--clustered-trigger-file',
+                        help='Optional clustered subset to highlight over the unclustered triggers')
+    parser.add_argument('--network-statistic', '--network-snr', dest='network_statistic', action='store_true',
+                        help='Label the statistic as a network statistic')
     parser.add_argument(
         "--output",
         required=True,
@@ -59,23 +64,37 @@ def load_triggers(trigger_file):
     with h5py.File(trigger_file, 'r') as f:
         template_id = np.asarray(f["template_id"][:])
         end_time = np.asarray(f["end_time"][:], dtype=np.float64)
-        snr = np.asarray(f["snr"][:], dtype=np.float64)
-    return template_id, end_time, snr
+        statistic = np.asarray(read_statistic(f), dtype=np.float64)
+    return template_id, end_time, statistic
 
 
-def make_plot(template_id, end_time, snr, channel, truth=None):
+def make_plot(template_id, end_time, statistic, channel, truth=None, clustered=None, network_statistic=False):
     """Build the merged-trigger scatter figure."""
     fig, ax = plt.subplots(figsize=(10, 5))
+    ids = np.concatenate([template_id, clustered[0]]) if clustered is not None else template_id
+    norm = plt.Normalize(ids.min(), ids.max()) if len(ids) else plt.Normalize(0, 1)
+    im = None
 
-    if len(snr) > 0:
+    if len(statistic) > 0:
         ax.scatter(
             end_time / 86400.0,
-            snr,
+            statistic,
             c=template_id,
             cmap='jet',
-            alpha=0.1,
+            norm=norm,
+            alpha=0.2,
+            label='Unclustered network peaks' if network_statistic else 'Unclustered triggers',
+            zorder=2,
         )
         im = ax.collections[0]
+    if clustered is not None and len(clustered[2]):
+        selected_ids, selected_times, selected_snrs = clustered
+        highlighted = ax.scatter(selected_times/86400., selected_snrs, c=selected_ids,
+            cmap='jet', norm=norm, marker='*', s=85, edgecolors='black',
+            label='Clustered candidates', zorder=3)
+        if im is None:
+            im = highlighted
+    if im is not None:
         cb = plt.colorbar(im, ax=ax)
         cb.set_label("Template ID")
 
@@ -84,7 +103,9 @@ def make_plot(template_id, end_time, snr, channel, truth=None):
         title += f" ({channel})"
     ax.set_title(title)
     ax.set_xlabel("Time (days)")
-    ax.set_ylabel("SNR")
+    ax.set_ylabel("Network statistic" if network_statistic else "Statistic")
+    if im is not None:
+        ax.legend()
     if truth is not None:
         _plot_truth_overlay(ax, truth)
     return fig
@@ -111,8 +132,8 @@ def main():
     init_logging(args.verbose)
     logger.info("Starting")
 
-    template_id, end_time, snr = load_triggers(args.trigger_file)
-    logger.info("Loaded %d triggers from %s", len(snr), args.trigger_file)
+    template_id, end_time, statistic = load_triggers(args.trigger_file)
+    logger.info("Loaded %d triggers from %s", len(statistic), args.trigger_file)
 
     truth = None
     if args.truth_file is not None:
@@ -122,7 +143,9 @@ def main():
             "Loaded %d %s truth source(s)", truth.n_sources, truth.source_group
         )
 
-    fig = make_plot(template_id, end_time, snr, args.channel, truth=truth)
+    clustered = load_triggers(args.clustered_trigger_file) if args.clustered_trigger_file else None
+    fig = make_plot(template_id, end_time, statistic, args.channel, truth=truth,
+                    clustered=clustered, network_statistic=args.network_statistic)
 
     fig.savefig(args.output, bbox_inches='tight')
     plt.close(fig)

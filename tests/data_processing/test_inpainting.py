@@ -48,7 +48,7 @@ def test_inpainting_overwhitened_is_zero(synthetic_data):
 
     # Overwhiten the inpainted data.
     fft_inpainted = np.fft.rfft(inpainted_ts.data)
-    overwhitened_fft = fft_inpainted / (psd.data ** 2)
+    overwhitened_fft = fft_inpainted / psd.data
 
     overwhitened_ts_data = np.fft.irfft(overwhitened_fft, n=num_samples)
 
@@ -95,7 +95,7 @@ def test_multiple_gaps(synthetic_data):
 
     # Overwhiten the inpainted data.
     fft_inpainted = np.fft.rfft(inpainted_ts.data)
-    overwhitened_fft = fft_inpainted / (psd.data ** 2)
+    overwhitened_fft = fft_inpainted / psd.data
     overwhitened_ts_data = np.fft.irfft(overwhitened_fft, n=num_samples)
 
     # Check that the over-whitened data in each gap is close to zero
@@ -135,3 +135,22 @@ def test_cg_convergence_warning(mock_cg, synthetic_data, caplog):
         gate_and_paint(input_ts, [gap_start], [gap_end], psd)
     
     assert "CG did not fully converge" in caplog.text
+
+
+def test_inpainting_matches_gaussian_conditional_mean():
+    """Inverse-PSD inpainting agrees with a direct covariance conditional mean."""
+    n = 8
+    spectrum = np.array([1., 2., 5., 4., 3.])
+    covariance_kernel = np.fft.irfft(spectrum, n=n)
+    indices = np.arange(n)
+    covariance = covariance_kernel[(indices[:, None]-indices[None, :]) % n]
+    missing = np.array([2, 3])
+    observed = np.array([0, 1, 4, 5, 6, 7])
+    values = np.array([.5, -.7, 0., 0., 1., -.3, .8, -.2])
+    expected = covariance[np.ix_(missing, observed)] @ np.linalg.solve(
+        covariance[np.ix_(observed, observed)], values[observed])
+    ts = TimeSeries(values, delta_t=1., epoch=0.)
+    psd = FrequencySeries(spectrum, delta_f=1/n)
+    result = gate_and_paint(ts, [2], [4], psd)
+    np.testing.assert_allclose(result.data[missing], expected, atol=1e-10)
+    np.testing.assert_array_equal(result.data[observed], values[observed])

@@ -1,4 +1,14 @@
 """Hwilas package."""
+import warnings
+
+# Suppress this constants advisory, it is _very_ noisy
+warnings.filterwarnings(
+    "ignore",
+    message=r"The following constants differ between lisaconstants and the version of astropy you have installed:",
+    category=UserWarning,
+    module=r"lisaconstants\.compat\.astropy",
+)
+
 from .common import (
     __version__,
     add_hwilas_common_options,

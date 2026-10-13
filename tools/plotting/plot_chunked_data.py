@@ -1,6 +1,6 @@
 """Produce frequency-domain plots (spectrum and PSD) of chunked data.
 
-Loads the chunked-data HDF5 files produced by ``hwilas_split_pad_data``
+Loads the chunked-data HDF5 files containing processed analysis windows
 (e.g. ``mojito_padded_chunk{N}.hdf`` or ``LDC2_sangria_hm_training_padded.hdf``)
 and produces two figures per channel, computed over the **analysis window only**
 (the 30-day padded section is excluded):
@@ -67,7 +67,7 @@ def load_arguments():
         required=True,
         nargs="+",
         help="HDF5 files of chunked, padded + inpainted data "
-             "(output of hwilas_split_pad_data). All chunks are overlaid on the "
+             "(processed channel data). All chunks are overlaid on the "
              "same axes."
     )
     parser.add_argument(

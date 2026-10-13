@@ -1,0 +1,5 @@
+"""Detector channel names and the LISA frame conversion offset."""
+AET_CHANNELS = ('LISA_A', 'LISA_E', 'LISA_T')
+XYZ_CHANNELS = ('LISA_X', 'LISA_Y', 'LISA_Z')
+LISA_CHANNELS = XYZ_CHANNELS + AET_CHANNELS
+TIME_OFFSET_20_DEGREES = 7365189.431698

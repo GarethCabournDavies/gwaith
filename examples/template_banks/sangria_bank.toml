@@ -1,0 +1,60 @@
+# Paths are relative to this file; masses are detector-frame solar masses.
+# FastBHB (2,2), TDI-1.5, one-day inspiral, at Sangria's 5-second cadence.
+[waveform]
+delta_t = 5.0
+initial_position_deg = -140.0
+laser_frequency = 2.816e14
+tdi = "1.5"
+f_lower = 0.000001
+f_upper = 0.09
+pre_merger_days = 1.0
+taper_seconds = 3600.0
+
+[bank]
+output_file = "output/sangria_bank.hdf"
+psd_A = "../psd_estimation/output/A_sangria_hm_SMOOTHED_PSD.txt"
+psd_E = "../psd_estimation/output/E_sangria_hm_SMOOTHED_PSD.txt"
+psd_units = "fractional_frequency"
+min_match = 0.9
+tolerance = 0.05
+window = 200
+batch = 40
+max_proposals = 200000
+max_lag_seconds = 500.0
+
+[prior.total_mass]
+min = 1000000.0
+max = 20000000.0
+distribution = "uniform"
+[prior.q]
+min = 1.0
+max = 4.0
+distribution = "uniform"
+[prior.spin1z]
+min = -0.98
+max = 0.98
+distribution = "uniform"
+[prior.spin2z]
+min = -0.98
+max = 0.98
+distribution = "uniform"
+[prior.eclipticlatitude]
+min = -1.5707963267948966
+max = 1.5707963267948966
+distribution = "sin_uniform"
+[prior.eclipticlongitude]
+min = 0.0
+max = 6.283185307179586
+distribution = "uniform"
+[prior.inclination]
+min = 0.0
+max = 3.141592653589793
+distribution = "cos_uniform"
+[prior.polarization]
+min = 0.0
+max = 3.141592653589793
+distribution = "uniform"
+[prior.coa_phase]
+min = 0.0
+max = 6.283185307179586
+distribution = "uniform"

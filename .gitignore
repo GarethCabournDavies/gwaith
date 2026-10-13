@@ -1,7 +1,45 @@
-__pycache__
-.venv
-.vscode
-hwilas.egg-info
+# Python, editor and test caches.
+__pycache__/
+*.py[cod]
+.venv/
+.vscode/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+/build/
+/dist/
+.DS_Store
+*.log
+
+# Generated workflow outputs and locally supplied example datasets.
+/output/
+/outputs/
+/examples/**/output/
+/examples/**/outputs/
+/tests/**/output/
+/tests/**/outputs/
+/examples/**/*.hdf
+/examples/**/*.h5
+/examples/**/*.hdf5
+/examples/**/*.npz
+/examples/**/*.npy
+
+# Diagnostic results stay local; diagnostic Python source remains versioned.
+/diagnostics/sangria/
+/docs/figures/
+/docs/mojito_residual_investigation.json
+
+# Local data archives and exploratory artwork.
+/tmp_*_changes/
+/tmp_*_data/
+/logo/options/
+
 # Data-specific diagnostic notebooks remain local.
 /examples/search/**/*.ipynb
 

@@ -101,7 +101,7 @@ def load_arguments():
         help="Low-frequency cutoff for matched filtering (Hz)"
     )
     parser.add_argument(
-        "--snr-threshold",
+        "--statistic-threshold", "--snr-threshold", dest="statistic_threshold",
         type=float,
         default=4.0,
         help="SNR threshold for peak detection"
@@ -246,7 +246,7 @@ def main():
 
             clustered_indices, _ = find_peaks(
                 abs(snr_data),
-                height=args.snr_threshold,
+                height=args.statistic_threshold,
                 distance=int(args.cluster_window / delta_t)
             )
 

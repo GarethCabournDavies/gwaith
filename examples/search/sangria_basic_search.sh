@@ -1,382 +1,362 @@
-#!/bin/bash
-set -e
+#!/usr/bin/env bash
+set -euo pipefail
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+cd "$script_dir"
+OUTPUT_DIR="${OUTPUT_DIR:-output/sangria}"
+data_file="${DATA_FILE:-${script_dir}/../data_processing/output/sangria/sangria_data_aet.hdf}"
+truth_source="${TRUTH_SOURCE:-${script_dir}/../datasets/output/LDC2_sangria_hm_training.hdf}"
+bank_file="${BANK_FILE:-../template_banks/output/sangria_bank.hdf}"
+psd_dir="${PSD_DIR:-../psd_estimation/output/sangria}"
+psd_file_a="${psd_dir}/A_sangria_SMOOTHED_PSD.txt"
+psd_file_e="${psd_dir}/E_sangria_SMOOTHED_PSD.txt"
+psd_file_t="${psd_dir}/T_sangria_UNSMOOTHED_PSD.txt"
+psd_fit_t="${psd_dir}/T_sangria_SMOOTHED_PSD.txt"
+tdi_generation=1.5
+truth_file="${OUTPUT_DIR}/sangria_truth.hdf"
+n_processes=4
 
-RUN_MODE="slurm" # Options: "slurm" or "bash"
+mkdir -p "$(dirname "$data_file")"
+hwilas_process_sangria_data --data-file "$truth_source" --output-file "$data_file" --channels LISA_A LISA_E LISA_T --verbose
 
-# All search outputs for this workflow go under output/sangria.
-OUTPUT_DIR="output/sangria"
+mkdir -p "$OUTPUT_DIR"
+hwilas_extract_truth --data-file "$truth_source" --type sangria --no-timeseries --output-file "$truth_file" --verbose
+search_dir="${OUTPUT_DIR}/round_0/matched_filter"
+template_parallelization=$n_processes
+network_statistic_threshold=${NETWORK_STATISTIC_THRESHOLD:-6}
+# Plot original data before the first search round.
+hwilas_plot_processed_data \
+    --data-file "$data_file" \
+    --truth-file "$truth_file" \
+    --end-exclusion 259200 \
+    --output-plot "${OUTPUT_DIR}/round_0/data.png" \
+    --output-whitened-plot "${OUTPUT_DIR}/round_0/data_whitened.png" \
+    --output-overwhitened-plot "${OUTPUT_DIR}/round_0/data_overwhitened.png" \
+    --psd-files LISA_A:"$psd_file_a" LISA_E:"$psd_file_e" LISA_T:"$psd_file_t" \
+    --verbose
 
-# Ensure the matched filter template script is executable
-chmod +x "$(dirname "$0")/matched_filter_template.sh"
+# # Combine A/E at every matched-filter sample; cluster network peaks across the bank.
 
-template_parallelization=15
-
-total_data_duration=$((365 * 86400)) # 1 year in seconds
-chunk_duration=$((122 * 86400))      # just over 4 months in seconds
-padding_for_process_data=$((30 * 86400)) # Padding for hwilas_process_sangria_data, e.g., 30 days
-
-current_analysis_start_time=0
-chunk_idx=0
-
-matched_filter_job_ids=()
-
-# This function creates a self-contained, executable script that can either be
-# submitted to Slurm as a job array or run directly with bash to execute all
-# tasks in parallel.
-handle_matched_filter_jobs() {
-    local chunk_output_dir=$1
-    local channel=$2
-    local chunk_idx=$3
-    local template_parallelization=$4
-
-    echo "Handling Matched Filter jobs for Channel ${channel} (Chunk ${chunk_idx})"
-    local sbatch_script="${chunk_output_dir}/logs/mf_${channel}_chunk${chunk_idx}.sbatch"
-    local sbatch_template_path
-    sbatch_template_path="$(dirname "$0")/sbatch_mf_template.sh"
-    # Use an absolute path for the template script to make the sbatch script portable
-    local template_script_path
-    template_script_path=$(readlink -f "$(dirname "$0")/matched_filter_template.sh")
-    local template_parallelization_minus_1=$((template_parallelization - 1))
-
-    # Sangria uses the LDC FastBHB time-domain generator with default TDI generation,
-    # and its own bank / PSD / padded-data paths.
-    local waveform_type="fastbhb"
-    local tdi_generation="1.5"
-    local bank_file="../template_banks/output/sangria_bank.hdf"
-    local psd_file_a="../psd_estimation/output/A_sangria_hm_SMOOTHED_PSD.txt"
-    local psd_file_e="../psd_estimation/output/E_sangria_hm_SMOOTHED_PSD.txt"
-    local input_data_file="${chunk_output_dir}/data_processing/LDC2_sangria_hm_training_padded.hdf"
-
-    # Create the executable sbatch script from the template
-    sed -e "s|@@CHUNK_OUTPUT_DIR@@|${chunk_output_dir}|g" \
-        -e "s|@@CHANNEL@@|${channel}|g" \
-        -e "s|@@CHUNK_IDX@@|${chunk_idx}|g" \
-        -e "s|@@TEMPLATE_PARALLELIZATION_MINUS_1@@|${template_parallelization_minus_1}|g" \
-        -e "s|@@TEMPLATE_PARALLELIZATION@@|${template_parallelization}|g" \
-        -e "s|@@TEMPLATE_SCRIPT_PATH@@|${template_script_path}|g" \
-        -e "s|@@WAVEFORM_TYPE@@|${waveform_type}|g" \
-        -e "s|@@TDI_GENERATION@@|${tdi_generation}|g" \
-        -e "s|@@BANK_FILE@@|${bank_file}|g" \
-        -e "s|@@PSD_FILE_A@@|${psd_file_a}|g" \
-        -e "s|@@PSD_FILE_E@@|${psd_file_e}|g" \
-        -e "s|@@INPUT_DATA_FILE@@|${input_data_file}|g" \
-        "${sbatch_template_path}" > "${sbatch_script}"
-
-    chmod +x "${sbatch_script}"
-
-    if [ "$RUN_MODE" == "slurm" ]; then
-        job_id=$(sbatch --parsable "${sbatch_script}")
-        matched_filter_job_ids+=("$job_id")
-    else # RUN_MODE == "bash"
-        "${sbatch_script}"
-    fi
-}
-
-# Step 1: Extract the injected-signal ("truth") catalog once, up front, so it
-# can be overlaid on the plotting steps below (coincidence, subtracted signals).
-echo "Extracting truth data..."
-mkdir -p "${OUTPUT_DIR}/round_0"
-hwilas_extract_truth \
-  --data-file ../datasets/LDC2_sangria_hm_training.hdf \
-  --output-file "${OUTPUT_DIR}/round_0/truth.h5" \
-  --channels LISA_A LISA_E LISA_T \
-  --verbose
-
-# Step 2: Load and convert Sangria data to AET channels (once, outside the chunk loop)
-echo "Loading and converting Sangria data to AET..."
-mkdir -p "${OUTPUT_DIR}/round_0/data_processing"
-hwilas_process_sangria_data \
-  --data-file ../datasets/LDC2_sangria_hm_training.hdf \
-  --output-file "${OUTPUT_DIR}/round_0/data_processing/sangria_aet.hdf" \
-  --channels LISA_A LISA_E LISA_T \
-  --verbose
-
-# Plot the processed data for a quick visual sanity check.
-echo "Plotting processed Sangria data..."
-mkdir -p "${OUTPUT_DIR}/round_0/data_processing/plots"
-hwilas_plot_downsampled_mojito \
-  --data-file "${OUTPUT_DIR}/round_0/data_processing/sangria_aet.hdf" \
-  --output-directory "${OUTPUT_DIR}/round_0/data_processing/plots" \
-  --channels LISA_A LISA_E LISA_T \
-  --verbose
-
-while (( $(echo "$current_analysis_start_time < $total_data_duration" | bc -l) )); do
-  analysis_end_time=$(echo "$current_analysis_start_time + $chunk_duration" | bc -l)
-  # Ensure the last chunk doesn't go beyond the total data duration
-  if (( $(echo "$analysis_end_time > $total_data_duration" | bc -l) )); then
-    analysis_end_time=$total_data_duration
-  fi
-
-  echo "--- Processing Chunk ${chunk_idx} (Analysis Window: ${current_analysis_start_time}s to ${analysis_end_time}s) ---"
-
-  chunk_output_dir="${OUTPUT_DIR}/round_0/chunk_${chunk_idx}"
-  mkdir -p "${chunk_output_dir}/data_processing"
-  mkdir -p "${chunk_output_dir}/matched_filter"
-  mkdir -p "${chunk_output_dir}/logs"
-
-  # Step 2: Split to analysis window, pad, and inpaint (common for both sangria and mojito)
-  # echo "Running hwilas_split_pad_data for chunk ${chunk_idx}"
-  # hwilas_split_pad_data \
-  #   --data-file output/round_0/data_processing/sangria_aet.hdf \
-  #   --output-file "${chunk_output_dir}/data_processing/LDC2_sangria_hm_training_padded.hdf" \
-  #   --psd-file ../psd_estimation/output/A_sangria_hm_SMOOTHED_PSD.txt \
-  #   --channels LISA_A LISA_E \
-  #   --padding-duration "${padding_for_process_data}" \
-  #   --analysis-start-time "${current_analysis_start_time}" \
-  #   --analysis-end-time "${analysis_end_time}" \
-  #   --verbose
-
-  # Plot the padded + inpainted data (and whitened / overwhitened diagnostics)
-  # to a single image for a quick visual sanity check.
-  # hwilas_plot_split_pad_data \
-  #   --data-file "${chunk_output_dir}/data_processing/LDC2_sangria_hm_training_padded.hdf" \
-  #   --psd-file ../psd_estimation/output/A_sangria_hm_SMOOTHED_PSD.txt \
-  #   --channels LISA_A LISA_E \
-  #   --analysis-start-time "${current_analysis_start_time}" \
-  #   --analysis-end-time "${analysis_end_time}" \
-  #   --output-file "${chunk_output_dir}/data_processing/plot_split_pad_data.png"
-
-  handle_matched_filter_jobs "${chunk_output_dir}" "LISA_A" "${chunk_idx}" "${template_parallelization}"
-  handle_matched_filter_jobs "${chunk_output_dir}" "LISA_E" "${chunk_idx}" "${template_parallelization}"
-
-  # Update for next chunk
-  current_analysis_start_time=$(echo "$current_analysis_start_time + $chunk_duration" | bc -l)
-  chunk_idx=$((chunk_idx + 1))
+candidate_dir="${OUTPUT_DIR}/round_0/candidates"
+mkdir -p "$search_dir" "$candidate_dir"
+status=0
+pids=()
+trigger_files=()
+for ((part=0; part<template_parallelization; part++)); do
+    trigger_files+=("${search_dir}/matched_filter_AE_${part}.hdf")
+    hwilas_matched_filter_search \
+        --input-data-file "$data_file" \
+        --bank-file "$bank_file" \
+        --channels LISA_A LISA_E \
+        --psd-files LISA_A:"$psd_file_a" LISA_E:"$psd_file_e" \
+        --waveform-type fastbhb \
+        --tdi-generation "$tdi_generation" \
+        --padding-time 129600 \
+        --end-exclusion 259200 \
+        --f-upper 0.09 \
+        --statistic-threshold "$network_statistic_threshold" \
+        --template-fraction-range "${part}/${template_parallelization}" \
+        --output-file "${search_dir}/matched_filter_AE_${part}.hdf" \
+        --verbose &
+    pids+=("$!")
 done
+for pid in "${pids[@]}"; do
+    wait "$pid" || status=1
+done
+[ "$status" -eq 0 ] || exit "$status"
 
-# if [ "$RUN_MODE" == "slurm" ]; then
-#   if [ ${#matched_filter_job_ids[@]} -eq 0 ]; then
-#     echo "No matched-filter jobs were submitted."
-#     exit 1
-#   fi
+hwilas_trigger_merge \
+    --trigger-files "${trigger_files[@]}" \
+    --output-file "${candidate_dir}/candidates.hdf" \
+    --unclustered-output-file "${candidate_dir}/candidates_unclustered.hdf" \
+    --cluster-across-templates \
+    --cluster-window 86400 \
+    --verbose
 
-#   joined_job_ids=$(IFS=,; echo "${matched_filter_job_ids[*]}") # Join all job IDs with commas
-#   echo "Monitoring $((${#matched_filter_job_ids[@]} * ${template_parallelization})) tasks across job arrays: ${joined_job_ids}"
-#   echo "Waiting for matched-filter Slurm jobs to finish: ${joined_job_ids}"
-#   while true; do
-#     active_jobs=0
-#     for job_id in "${matched_filter_job_ids[@]}"; do
-#       # squeue -h -j "$job_id" will list all tasks for that specific job array
-#       active_jobs=$((active_jobs + $(squeue -h -r -j "$job_id" 2>/dev/null | wc -l)))
-#     done
-#     if [ "${active_jobs}" -eq 0 ]; then
-#       break
-#     fi
-#     echo "${active_jobs} total matched-filter jobs (from all chunks and channels) still running/pending..."
-#     sleep 30
-#   done
+hwilas_candidate_hdf_to_csv \
+    --input-file "${candidate_dir}/candidates.hdf" \
+    --output-file "${candidate_dir}/candidates.csv" \
+    --bank-file "$bank_file" \
+    --verbose
 
-#   echo "All matched-filter Slurm jobs have finished."
-# fi
-
-# shopt -s nullglob
-# files_A=(output/round_0/chunk_*/matched_filter/matched_filter_snr_peaks_LISA_A_*.hdf)
-# files_E=(output/round_0/chunk_*/matched_filter/matched_filter_snr_peaks_LISA_E_*.hdf)
-# shopt -u nullglob
-
-# # echo ${files_A[@]}
-# # echo ${files_E[@]}
+hwilas_plot_trigger_merge \
+    --trigger-file "${candidate_dir}/candidates_unclustered.hdf" \
+    --clustered-trigger-file "${candidate_dir}/candidates.hdf" \
+    --network-statistic \
+    --channel "LISA_A+LISA_E" \
+    --output "${candidate_dir}/candidates.png" \
+    --truth-file "$truth_file" \
+    --verbose
 
 
-# if [ ${#files_A[@]} -eq 0 ] || [ ${#files_E[@]} -eq 0 ]; then
-#   echo "Missing matched-filter output files after Slurm completion."
-#   echo "Check logs in output/round_0/logs"
-#   exit 1
-# fi
+# # Fit coincident candidates and write their summed signal on the original data grid.
+optimise_dir="${OUTPUT_DIR}/round_0/optimise"
+subtract_dir="${OUTPUT_DIR}/round_0/subtract"
+mkdir -p "$optimise_dir" "$subtract_dir"
 
-# mkdir -p output/round_0/trigger_merge
-# mkdir -p output/round_0/trigger_merge
-# echo "Running Trigger Merge Jobs"
-# hwilas_trigger_merge \
-#   --verbose \
-#   --trigger-files "${files_A[@]}" \
-#   --output-file output/round_0/trigger_merge/trigger_merge_A.hdf \
-#   --cluster-window 2592000
+hwilas_optimise_snr_peaks \
+    --input-file "${candidate_dir}/candidates.hdf" \
+    --bank-file "$bank_file" \
+    --data-files "$data_file" \
+    --psd-files LISA_A:"$psd_file_a" LISA_E:"$psd_file_e" LISA_T:"$psd_fit_t" \
+    --fit-channels LISA_A LISA_E LISA_T \
+    --optimisation-channels LISA_A LISA_E \
+    --output-timeseries-channels LISA_A LISA_E LISA_T \
+    --output-timeseries-file "${optimise_dir}/optimise.hdf" \
+    --output-parameter-file "${optimise_dir}/optimise_parameters.hdf" \
+    --tdi-generation "$tdi_generation" \
+    --statistic-threshold 40 \
+    --minimum-peak-separation 259200 \
+    --optimisation-window-before 691200 \
+    --optimisation-window-after 86400 \
+    --n-particles 128 \
+    --n-iterations 400 \
+    --n-processes "$n_processes" \
+    --polish-evaluations 5000 \
+    --seed 606 \
+    --minimum-bounds \
+        mchirp:5e4 eta:0.0826446281 spin1z:-0.99 spin2z:-0.99 \
+        eclipticlongitude:0 eclipticlatitude:-1.57079632679 \
+        inclination:0 polarization:0 \
+    --maximum-bounds \
+        mchirp:3e7 eta:0.25 spin1z:0.99 spin2z:0.99 \
+        eclipticlongitude:6.28318530718 eclipticlatitude:1.57079632679 \
+        inclination:3.14159265359 polarization:3.14159265359 \
+    --bounds-window-relative-to-initial log_mchirp:0.65 tc:3600 \
+    --f-lower 0.00003 \
+    --verbose
 
-# hwilas_plot_trigger_merge \
-#   --trigger-file output/round_0/trigger_merge/trigger_merge_A.hdf \
-#   --channel LISA_A \
-#   --output-directory output/round_0/trigger_merge
+hwilas_candidate_hdf_to_csv \
+    --input-file "${optimise_dir}/optimise_parameters.hdf" \
+    --output-file "${optimise_dir}/optimised_events.csv" \
+    --verbose
 
-# hwilas_trigger_merge \
-#   --verbose \
-#   --trigger-files "${files_E[@]}" \
-#   --output-file output/round_0/trigger_merge/trigger_merge_E.hdf \
-#   --cluster-window 2592000
+# Subtract the first-round model before searching for weaker or overlapping signals.
+hwilas_subtract_signals \
+    --data "${data_file}" \
+    --signal-files "${optimise_dir}/optimise.hdf" \
+    --output "${subtract_dir}/data_subtracted.hdf" \
+    --channels LISA_A LISA_E LISA_T \
+    --verbose
 
-# hwilas_plot_trigger_merge \
-#   --trigger-file output/round_0/trigger_merge/trigger_merge_E.hdf \
-#   --channel LISA_E \
-#   --output-directory output/round_0/trigger_merge
+# Plot the first residual with markers for the signals already removed.
+hwilas_plot_processed_data \
+    --data-file "${subtract_dir}/data_subtracted.hdf" \
+    --truth-file "$truth_file" \
+    --removed-parameter-files "${optimise_dir}/optimise_parameters.hdf" \
+    --end-exclusion 259200 \
+    --output-plot "${OUTPUT_DIR}/round_1/data.png" \
+    --output-whitened-plot "${OUTPUT_DIR}/round_1/data_whitened.png" \
+    --output-overwhitened-plot "${OUTPUT_DIR}/round_1/data_overwhitened.png" \
+    --psd-files LISA_A:"$psd_file_a" LISA_E:"$psd_file_e" LISA_T:"$psd_file_t" \
+    --verbose
 
-# mkdir -p output/round_0/coincidence
+# Second round: search A/E jointly on the residual and cluster the network candidates.
+round1_search_dir="${OUTPUT_DIR}/round_1/matched_filter"
+round1_candidate_dir="${OUTPUT_DIR}/round_1/candidates"
 
-# hwilas_coincidence \
-#   --verbose \
-#   --trigger-merge-files \
-#     LISA_A:output/round_0/trigger_merge/trigger_merge_A.hdf \
-#     LISA_E:output/round_0/trigger_merge/trigger_merge_E.hdf \
-#   --output-file output/round_0/coincidence/coincidence.hdf \
-#   --coincidence-window 3600 \
-#   --expected-snr-file optimal_snr/optimal_snr_fitting_factors.hdf
+mkdir -p "$round1_search_dir" "$round1_candidate_dir"
+status=0
+pids=()
+trigger_files=()
+for ((part=0; part<template_parallelization; part++)); do
+    trigger_files+=("${round1_search_dir}/matched_filter_AE_${part}.hdf")
+    run_search_job 1 "${round1_search_dir}/matched_filter_${part}-%j.log" hwilas_matched_filter_search \
+        --input-data-file "${subtract_dir}/data_subtracted.hdf" \
+        --bank-file "$bank_file" \
+        --channels LISA_A LISA_E \
+        --psd-files LISA_A:"$psd_file_a" LISA_E:"$psd_file_e" \
+        --waveform-type fastbhb \
+        --tdi-generation "$tdi_generation" \
+        --padding-time 129600 \
+        --end-exclusion 259200 \
+        --f-upper 0.09 \
+        --statistic-threshold "$network_statistic_threshold" \
+        --template-fraction-range "${part}/${template_parallelization}" \
+        --output-file "${round1_search_dir}/matched_filter_AE_${part}.hdf" \
+        --verbose &
+    pids+=("$!")
+done
+for pid in "${pids[@]}"; do
+    wait "$pid" || status=1
+done
+[ "$status" -eq 0 ] || exit "$status"
 
-# hwilas_plot_coincidence \
-#   --input-file output/round_0/coincidence/coincidence.hdf \
-#   --channels LISA_A LISA_E \
-#   --coincidence-window 3600 \
-#   --expected-snr-file optimal_snr/optimal_snr_fitting_factors.hdf \
-#   --output-directory output/round_0/coincidence
+hwilas_trigger_merge \
+    --trigger-files "${trigger_files[@]}" \
+    --output-file "${round1_candidate_dir}/candidates.hdf" \
+    --unclustered-output-file "${round1_candidate_dir}/candidates_unclustered.hdf" \
+    --cluster-across-templates \
+    --cluster-window 86400 \
+    --verbose
+hwilas_candidate_hdf_to_csv \
+    --input-file "${round1_candidate_dir}/candidates.hdf" \
+    --output-file "${round1_candidate_dir}/candidates.csv" \
+    --previous-event-files "${candidate_dir}/candidates.hdf" \
+    --exclusion-window 3600 \
+    --bank-file "$bank_file" \
+    --verbose
+hwilas_plot_trigger_merge \
+    --trigger-file "${round1_candidate_dir}/candidates_unclustered.hdf" \
+    --clustered-trigger-file "${round1_candidate_dir}/candidates.hdf" \
+    --network-statistic \
+    --channel "LISA_A+LISA_E" \
+    --output "${round1_candidate_dir}/candidates.png" \
+    --truth-file "$truth_file" \
+    --verbose
 
 
-# mkdir -p output/round_0/optimise
+# Collect cross-round seeds, keeping earlier-round events within the exclusion window.
+hwilas_collect_search_candidates \
+    --input-files "${candidate_dir}/candidates.hdf" "${round1_candidate_dir}/candidates.hdf" \
+    --output-file "${OUTPUT_DIR}/final/all_candidates.hdf" \
+    --csv-file "${OUTPUT_DIR}/final/all_candidates.csv" \
+    --bank-file "$bank_file" \
+    --close-event-window 3600 \
+    --exclude-later-close-events \
+    --verbose
 
-# hwilas_optimise_snr_peaks \
-#   --input-file output/round_0/coincidence/coincidence.hdf \
-#   --output-timeseries-file \
-#     output/round_0/optimise/optimise.hdf \
-#   --output-parameter-file \
-#     output/round_0/optimise/optimise_parameters.hdf \
-#   --data-files \
-#     output/round_0/chunk_0/data_processing/LDC2_sangria_hm_training_padded.hdf \
-#     output/round_0/chunk_1/data_processing/LDC2_sangria_hm_training_padded.hdf \
-#     output/round_0/chunk_2/data_processing/LDC2_sangria_hm_training_padded.hdf \
-#   --psd-file ../psd_estimation/output/A_sangria_hm_SMOOTHED_PSD.txt \
-#   --bank-file ../template_banks/output/sangria_bank.hdf \
-#   --verbose \
-#   --minimum-bounds \
-#     mchirp:4e5 \
-#     eta:0.16 \
-#     spin1z:-0.98 \
-#     spin2z:-0.98 \
-#     eclipticlongitude:0 \
-#     eclipticlatitude:-1.5707 \
-#     inclination:0 \
-#     polarization:0 \
-#   --maximum-bounds \
-#     mchirp:9e6 \
-#     eta:0.25 \
-#     spin1z:0.98 \
-#     spin2z:0.98 \
-#     eclipticlongitude:6.2832 \
-#     eclipticlatitude:1.5707 \
-#     inclination:3.1416 \
-#     polarization:6.2832 \
-#   --bounds-window-relative-to-initial \
-#     log_mchirp:0.1 \
-#     tc:3600
+# Fit every surviving second-round candidate; retain earlier-window flags.
+round1_optimise_dir="${OUTPUT_DIR}/round_1/optimise"
+mkdir -p "$round1_optimise_dir"
 
-# mkdir -p output/round_0/optimise/plots
-# hwilas_plot_optimise_waveforms \
-#   --parameter-file output/round_0/optimise/optimise_parameters.hdf \
-#   --input-file output/round_0/coincidence/coincidence.hdf \
-#   --bank-file ../template_banks/output/sangria_bank.hdf \
-#   --data-files \
-#     output/round_0/chunk_0/data_processing/LDC2_sangria_hm_training_padded.hdf \
-#     output/round_0/chunk_1/data_processing/LDC2_sangria_hm_training_padded.hdf \
-#     output/round_0/chunk_2/data_processing/LDC2_sangria_hm_training_padded.hdf \
-#   --psd-file ../psd_estimation/output/A_sangria_hm_SMOOTHED_PSD.txt \
-#   --output-directory output/round_0/optimise/plots \
-#   --f-lower 1e-5 \
-#   --verbose
+hwilas_optimise_snr_peaks \
+    --input-file "${round1_candidate_dir}/candidates.hdf" \
+    --bank-file "$bank_file" \
+    --data-files "${subtract_dir}/data_subtracted.hdf" \
+    --psd-files LISA_A:"$psd_file_a" LISA_E:"$psd_file_e" LISA_T:"$psd_fit_t" \
+    --fit-channels LISA_A LISA_E LISA_T \
+    --optimisation-channels LISA_A LISA_E \
+    --output-timeseries-channels LISA_A LISA_E LISA_T \
+    --output-timeseries-file "${round1_optimise_dir}/optimise.hdf" \
+    --output-parameter-file "${round1_optimise_dir}/optimise_parameters.hdf" \
+    --tdi-generation "$tdi_generation" \
+    --statistic-threshold 20 \
+    --previous-parameter-file "${optimise_dir}/optimise_parameters.hdf" \
+    --optimisation-window-before 172800 \
+    --optimisation-window-after 172800 \
+    --n-particles 256 \
+    --n-iterations 75 \
+    --n-processes "$n_processes" \
+    --polish-evaluations 5000 \
+    --seed 607 \
+    --minimum-bounds \
+        mchirp:5e4 eta:0.0826446281 spin1z:-0.99 spin2z:-0.99 \
+        eclipticlongitude:0 eclipticlatitude:-1.57079632679 \
+        inclination:0 polarization:0 \
+    --maximum-bounds \
+        mchirp:3e7 eta:0.25 spin1z:0.99 spin2z:0.99 \
+        eclipticlongitude:6.28318530718 eclipticlatitude:1.57079632679 \
+        inclination:3.14159265359 polarization:3.14159265359 \
+    --bounds-window-relative-to-initial log_mchirp:0.65 tc:3600 \
+    --f-lower 0.00003 \
+    --verbose
 
-# rm output/round_0/subtract/sangria_data_subtracted.hdf
-# mkdir -p output/round_0/subtract
-# gwaith_subtract_signals \
-#   --channels \
-#     LISA_A LISA_E LISA_T \
-#   --verbose \
-#   --data \
-#     output/round_0/data_processing/sangria_aet.hdf \
-#   --signal-files \
-#     output/round_0/optimise/optimise.hdf \
-#   --output \
-#     output/round_0/subtract/sangria_data_subtracted.hdf
+hwilas_candidate_hdf_to_csv \
+    --input-file "${round1_optimise_dir}/optimise_parameters.hdf" \
+    --output-file "${round1_optimise_dir}/optimised_events.csv" \
+    --previous-event-files "${optimise_dir}/optimise_parameters.hdf" \
+    --exclusion-window 3600 \
+    --verbose
 
-# mkdir -p output/round_0/subtract/plots
-# hwilas_plot_subtracted_signals \
-#   --data-file \
-#     output/round_0/data_processing/sangria_aet.hdf \
-#   --signal-file \
-#     output/round_0/optimise/optimise.hdf \
-#   --subtracted-file \
-#     output/round_0/subtract/sangria_data_subtracted.hdf \
-#   --parameter-file \
-#     output/round_0/optimise/optimise_parameters.hdf \
-#   --truth-file \
-#     ${OUTPUT_DIR}/round_0/truth.h5 \
-#   --output-directory \
-#     output/round_0/subtract/plots \
-#   --channels LISA_A LISA_E LISA_T \
-#   --event-window 0.05,0.025 \
-#   --verbose
+# Keep the full fitted catalogue and subtract both models once from the original.
+final_dir="${OUTPUT_DIR}/final"
+all_parameters_file="${final_dir}/all_optimised_parameters.hdf"
+final_residual_file="${final_dir}/residual.hdf"
+all_signals_file="${final_dir}/all_optimised_signals.hdf"
+mkdir -p "$final_dir"
+hwilas_combine_search_parameters \
+    --input-files "${optimise_dir}/optimise_parameters.hdf" "${round1_optimise_dir}/optimise_parameters.hdf" \
+    --output-file "$all_parameters_file" \
+    --csv-file "${final_dir}/all_optimised_parameters.csv" \
+    --data-file "$data_file" \
+    --output-timeseries-file "$all_signals_file" \
+    --channels LISA_A LISA_E LISA_T \
+    --close-event-window 3600 \
+    --exclude-later-close-events \
+    --verbose
 
-# # mkdir -p output/round_1/matched_filter
-# for template_range in $(seq 0 $((${template_parallelization} - 1))) ; do
-#   echo ${template_range}/${template_parallelization}
-#   echo "Channel A"
-#   hwilas_matched_filter \
-#     --start-time 0 \
-#     --end-time 6280000 \
-#     --bank-file ../template_banks/output/sangria_bank.hdf \
-#     --psd-file ../psd_estimation/A_sangria_hm_SMOOTHED_PSD.txt \
-#     --input-data-file output/round_0/subtract/sangria_data_subtracted.hdf \
-#     --channel LISA_A \
-#     --output-file output/round_1/matched_filter/matched_filter_snr_peaks_A_${template_range}.hdf \
-#     --template-fraction-range ${template_range}/${template_parallelization} \
-#     --testing-plots output/round_1/matched_filter
+# Subtract the retained-event model once from the original strain.
+hwilas_subtract_signals \
+    --data "$data_file" \
+    --signal-files "$all_signals_file" \
+    --output "$final_residual_file" \
+    --channels LISA_A LISA_E LISA_T \
+    --verbose
 
-#   echo "Channel E"
-#   hwilas_matched_filter \
-#   --start-time 0 \
-#   --end-time 6280000 \
-#   --bank-file ../template_banks/output/sangria_bank.hdf \
-#   --psd-file ../psd_estimation/A_sangria_hm_SMOOTHED_PSD.txt \
-#   --input-data-file output/round_0/subtract/sangria_data_subtracted.hdf \
-#   --channel LISA_E \
-#   --output-file output/round_1/matched_filter/matched_filter_snr_peaks_E_${template_range}.hdf \
-#   --template-fraction-range ${template_range}/${template_parallelization} \
-#   --testing-plots output/round_1/matched_filter
+# Plot the final residual with removal markers from both optimisation rounds.
+hwilas_plot_processed_data \
+    --data-file "$final_residual_file" \
+    --truth-file "$truth_file" \
+    --removed-parameter-files "$all_parameters_file" \
+    --end-exclusion 259200 \
+    --output-plot "${final_dir}/residual_test/data.png" \
+    --output-whitened-plot "${final_dir}/residual_test/data_whitened.png" \
+    --output-overwhitened-plot "${final_dir}/residual_test/data_overwhitened.png" \
+    --psd-files LISA_A:"$psd_file_a" LISA_E:"$psd_file_e" LISA_T:"$psd_file_t" \
+    --verbose
 
-# done
+# Final residual test: repeat the bank search without fitting further candidates.
+residual_search_dir="${OUTPUT_DIR}/final/residual_test/matched_filter"
+residual_candidate_dir="${OUTPUT_DIR}/final/residual_test/candidates"
 
-# files_A=$( ls $(pwd)/output/round_1/matched_filter/matched_filter_snr_peaks_A_*.hdf )
-# files_E=$( ls $(pwd)/output/round_1/matched_filter/matched_filter_snr_peaks_E_*.hdf )
+mkdir -p "$residual_search_dir" "$residual_candidate_dir"
+status=0
+pids=()
+trigger_files=()
+for ((part=0; part<template_parallelization; part++)); do
+    trigger_files+=("${residual_search_dir}/matched_filter_AE_${part}.hdf")
+    run_search_job 1 "${residual_search_dir}/matched_filter_${part}-%j.log" hwilas_matched_filter_search \
+        --input-data-file "$final_residual_file" \
+        --bank-file "$bank_file" \
+        --channels LISA_A LISA_E \
+        --psd-files LISA_A:"$psd_file_a" LISA_E:"$psd_file_e" \
+        --waveform-type fastbhb \
+        --tdi-generation "$tdi_generation" \
+        --padding-time 129600 \
+        --end-exclusion 259200 \
+        --f-upper 0.09 \
+        --statistic-threshold "$network_statistic_threshold" \
+        --template-fraction-range "${part}/${template_parallelization}" \
+        --output-file "${residual_search_dir}/matched_filter_AE_${part}.hdf" \
+        --verbose &
+    pids+=("$!")
+done
+for pid in "${pids[@]}"; do
+    wait "$pid" || status=1
+done
+[ "$status" -eq 0 ] || exit "$status"
 
-# mkdir -p output/round_1/trigger_merge
-# hwilas_trigger_merge \
-#   --verbose \
-#   --trigger-files $files_A \
-#   --output-file output/round_1/trigger_merge/trigger_merge_A.hdf
+hwilas_trigger_merge \
+    --trigger-files "${trigger_files[@]}" \
+    --output-file "${residual_candidate_dir}/candidates.hdf" \
+    --unclustered-output-file "${residual_candidate_dir}/candidates_unclustered.hdf" \
+    --cluster-across-templates \
+    --cluster-window 86400 \
+    --verbose
 
-# hwilas_plot_trigger_merge \
-#   --trigger-file output/round_1/trigger_merge/trigger_merge_A.hdf \
-#   --channel LISA_A \
-#   --output-directory output/round_1/trigger_merge
+hwilas_candidate_hdf_to_csv \
+    --input-file "${residual_candidate_dir}/candidates.hdf" \
+    --output-file "${residual_candidate_dir}/candidates.csv" \
+    --bank-file "$bank_file" \
+    --verbose
 
-# hwilas_trigger_merge \
-#   --verbose \
-#   --trigger-files $files_E \
-#   --output-file output/round_1/trigger_merge_E.hdf
+hwilas_plot_trigger_merge \
+    --trigger-file "${residual_candidate_dir}/candidates_unclustered.hdf" \
+    --clustered-trigger-file "${residual_candidate_dir}/candidates.hdf" \
+    --network-statistic \
+    --channel "LISA_A+LISA_E" \
+    --output "${residual_candidate_dir}/candidates.png" \
+    --truth-file "$truth_file" \
+    --verbose
 
-# hwilas_plot_trigger_merge \
-#   --trigger-file output/round_1/trigger_merge_E.hdf \
-#   --channel LISA_E \
-#   --output-directory output/round_1/trigger_merge
 
-# mkdir -p output/round_1/coincidence
-
-# hwilas_coincidence \
-#   --trigger-merge-files \
-#     LISA_A:output/round_1/trigger_merge/trigger_merge_A.hdf \
-#     LISA_E:output/round_1/trigger_merge/trigger_merge_E.hdf \
-#   --output-file output/round_1/coincidence/coincidence.hdf \
-#   --coincidence-window 3600 \
-#   --expected-snr-file output/optimal_snr/optimal_snr_fitting_factors.hdf
-
-# hwilas_plot_coincidence \
-#   --input-file output/round_1/coincidence/coincidence.hdf \
-#   --channels LISA_A LISA_E \
-#   --coincidence-window 3600 \
-#   --expected-snr-file output/optimal_snr/optimal_snr_fitting_factors.hdf \
-#   --truth-file ${OUTPUT_DIR}/round_0/truth.h5 \
-#   --output-directory output/round_1/coincidence
+# Check subtraction consistency and candidates remaining in the final residual.
+hwilas_check_search_residuals \
+    --data-file "$data_file" \
+    --residual-file "$final_residual_file" \
+    --end-exclusion 259200 \
+    --signal-files "$all_signals_file" \
+    --parameter-file "$all_parameters_file" \
+    --candidate-file "${residual_candidate_dir}/candidates.hdf" \
+    --output-file "${final_dir}/residual_report.json" \
+    --verbose

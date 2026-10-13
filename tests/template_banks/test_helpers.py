@@ -40,7 +40,8 @@ def test_parse_mode_array_error():
         parse_mode_array(params)
 
 
-def test_waveform_from_bank():
+@pytest.mark.parametrize("tc", [None, 0.0, 172800.0])
+def test_waveform_from_bank(tc):
     """Test the construction of a waveform dictionary from a bank file."""
     # Mock bank file (dictionary of arrays)
     bank_file = {
@@ -58,6 +59,8 @@ def test_waveform_from_bank():
     }
 
     waveform_params_shared = {"f_ref": 10.0}
+    if tc is not None:
+        waveform_params_shared["tc"] = tc
     idx = 1
     data_length = 4096
 
@@ -65,7 +68,7 @@ def test_waveform_from_bank():
         bank_file, idx, waveform_params_shared, data_length
     )
 
-    assert wf_params["tc"] == data_length
+    assert wf_params["tc"] == (data_length if tc is None else tc)
     assert wf_params["mass1"] == 20.0
     assert wf_params["mass2"] == 15.0
     assert wf_params["inclination"] == 0.2

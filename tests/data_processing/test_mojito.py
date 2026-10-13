@@ -8,9 +8,9 @@ from gwaith.types import TimeSeries
 
 from hwilas.data_processing.mojito import (
     load_downsample_mojito,
-    bandpass_filter_scipy,
     _apply_edge_taper,
 )
+from hwilas.filter import bandpass_filter_scipy
 
 
 def test_bandpass_filter_scipy():

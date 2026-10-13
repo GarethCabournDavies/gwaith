@@ -5,6 +5,8 @@ This is a script to run matched filtering using a basic template bank search
 # Import necessary libraries
 import argparse  # Library for parsing command-line arguments
 import logging  # Library for logging messages
+from hwilas.search.partitions import partition_range
+from hwilas.search.statistics import canonical_statistics, read_statistic
 import h5py  # Library for interacting with HDF5 files
 import numpy as np
 from tqdm.auto import tqdm
@@ -15,10 +17,12 @@ from scipy.fft import next_fast_len
 from gwaith.types import TimeSeries, FrequencySeries
 
 from hwilas import add_hwilas_common_options, init_logging
+from hwilas.types import KeyValueAction
 from hwilas.filter import matched_filter_frequencyseries
 from hwilas.psd.read import from_txt as psd_from_txt
 from hwilas.template_banks.helpers import waveform_from_bank
-from hwilas.waveforms.short_fastbhb import short_template
+from hwilas.waveforms.short_fastbhb import short_template, template_geometry
+from hwilas.template_banks.frequency import duration_from_frequency
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +35,6 @@ def main():
     # Add argument for the PSD files (required) with custom action for multiple detectors
     parser.add_argument(
         '--psd-file',
-        required=True,
     )
 
     # Add argument for the bank file (required)
@@ -39,7 +42,11 @@ def main():
 
     # Add argument for the data file (required)
     parser.add_argument('--input-data-file', required=True)
-    parser.add_argument('--channel', required=True)
+    selection = parser.add_mutually_exclusive_group(required=True)
+    selection.add_argument('--channel')
+    selection.add_argument('--channels', nargs='+', choices=['LISA_A', 'LISA_E'])
+    parser.add_argument('--psd-files', nargs='+', action=KeyValueAction,
+                        help='Channel-specific PSDs as channel:filename pairs')
 
     # # Add argument for the start/end times taht will be searched within the data file (required)
 
@@ -76,9 +83,10 @@ def main():
     )
 
     parser.add_argument(
-        "--snr-threshold",
+        "--statistic-threshold", "--snr-threshold",
+        dest="statistic_threshold",
         type=float,
-        help="Remove any SNR peaks which have SNR values below this threshold"
+        help="Remove peaks whose statistic is below this threshold"
     )
 
     parser.add_argument(
@@ -108,14 +116,6 @@ def main():
                         help="Optional, analyze only part of template bank. Format"
                             " PART/NUM_PARTS")
 
-    def parse_template_range(num_templates, rangestr):
-        part, pieces = map(int, rangestr.split("/"))
-        if pieces <= 0 or not 0 <= part < pieces:
-            raise ValueError("Template fraction must be PART/NUM_PARTS with 0 <= PART < NUM_PARTS")
-        tmin = int(num_templates / float(pieces) * part)
-        tmax = int(num_templates / float(pieces) * (part+1))
-        return tmin, tmax
-
     parser.add_argument(
         "--output-file",
         required=True,
@@ -136,6 +136,20 @@ def main():
                         help="Discard this many seconds before filtering, in addition to template edge support; default 3 days")
     args = parser.parse_args()
 
+    channels = args.channels or [args.channel]
+    if len(set(channels)) != len(channels):
+        parser.error('Channels must be unique')
+    if len(channels) > 1 and set(channels) != {'LISA_A', 'LISA_E'}:
+        parser.error('Joint filtering requires LISA_A and LISA_E')
+    if args.psd_files is None and args.psd_file is None:
+        parser.error('Provide --psd-file or --psd-files')
+    if len(channels) > 1 and (not args.psd_files or any(c not in args.psd_files for c in channels)):
+        parser.error('Provide a separate PSD for each joint-search channel')
+    if args.psd_files and any(c not in args.psd_files for c in channels):
+        parser.error('Provide a PSD for every channel')
+    if not np.isfinite(args.cluster_window) or args.cluster_window < 0:
+        parser.error('Cluster window must be finite and nonnegative')
+    args.channel = '+'.join(channels)
     init_logging(args.verbose)
 
     logger.info("Starting")
@@ -147,11 +161,11 @@ def main():
         laser_frequency = float(data_file.attrs.get("laser_frequency", 2.816e14))
         data_epoch = data_file.attrs['epoch']
         delta_t = data_file.attrs['delta_t']
-        data = TimeSeries(
-            data_file[args.channel][:],
-            delta_t=delta_t,
-            epoch=data_epoch,
-        )
+        channel_data = {c: TimeSeries(data_file[c][:], delta_t=delta_t, epoch=data_epoch)
+                        for c in channels}
+        if len({len(x) for x in channel_data.values()}) != 1:
+            raise ValueError('Channel sample counts differ')
+        data = channel_data[channels[0]]
         padding_duration_from_file = float(data_file.attrs.get('padding_duration', 0.0))
         stored_analysis_start = data_file.attrs.get('analysis_start_time')
         stored_analysis_end = data_file.attrs.get('analysis_end_time')
@@ -193,11 +207,19 @@ def main():
     # valid_data_start = max(args.start_time, data_start_time + padding_duration)
     # valid_data_end = min(args.end_time, data_end_time + padding_duration)
 
-    if args.channel not in ("LISA_A", "LISA_E"):
+    if any(c not in ("LISA_A", "LISA_E") for c in channels):
         raise ValueError("Short templates support LISA_A/E")
     if not 0 < args.f_upper < .5/delta_t:
         raise ValueError("Short-template band must lie inside Nyquist")
-    # Require the full two-day template buffer to lie inside the real data.
+    with h5py.File(args.bank_file, 'r') as bank_file:
+        durations = np.array([duration_from_frequency(
+            {k: float(bank_file[k][i]) for k in ('mass1', 'mass2', 'spin1z', 'spin2z', 'distance')},
+            float(bank_file['f_lower'][i])) for i in range(len(bank_file['mass1']))])
+    max_template_seconds = (np.ceil((durations.max()+3600.)/delta_t)
+                            + np.ceil(86400./delta_t))*delta_t
+    logger.info('Bank inspiral support: %.3f to %.3f days; one day post-merger',
+                durations.min()/86400., durations.max()/86400.)
+    # Per-template exclusions below require the full buffer inside the real data.
     edge = max(args.padding_time, 2*86400.)
     valid_start_time = max(valid_start_time, data_start_time+edge)
     if args.end_exclusion < 0:
@@ -209,15 +231,17 @@ def main():
         raise ValueError("Data are too short after excluding template edge support")
     logger.info("Retaining data through %.0f; valid trigger end %.0f",usable_end_time,valid_end_time)
     logger.debug("Discarding the end before tapering and Fourier transforming")
-    retained = data.data[:working_dlen]
     win = tukey(working_dlen, alpha=min(1., 2*86400/(working_dlen*delta_t)))
-    data = TimeSeries(detrend(retained)*win, epoch=data_epoch, delta_t=delta_t)
+    channel_data = {c: TimeSeries(detrend(x.data[:working_dlen])*win,
+                                 epoch=data_epoch, delta_t=delta_t) for c, x in channel_data.items()}
+    data = channel_data[channels[0]]
 
     # Separate the real-data boundaries by a full template buffer in the FFT.
-    fft_length = next_fast_len(working_dlen+int(np.ceil(2*86400/delta_t)))
+    fft_length = next_fast_len(working_dlen+int(np.ceil(max_template_seconds/delta_t)))
     logger.debug("FFT padding: %d samples (%g days)",
                  fft_length-working_dlen, (fft_length-working_dlen)*delta_t/86400.)
-    data.resize(fft_length)
+    for x in channel_data.values():
+        x.resize(fft_length)
 
     padded_dlen = len(data)
     tlen = padded_dlen * delta_t
@@ -228,35 +252,28 @@ def main():
     waveform_params_shared = {'tc': 2*86400., 'delta_t': delta_t}
 
     logger.info("Loading PSD")
-    psd = psd_from_txt(
-        args.psd_file,
-        flen,
-        delta_f,
-        delta_f,
-        is_asd_file=False,
-    )
-
-    psd = FrequencySeries(
-        psd.data,
-        delta_f=delta_f,
-    )
-
-    # To avoid a division by zero error in the matched filter, we set the
-    # low frequency bins of the PSD to infinity.
-    psd.data[0] = np.inf
-    psd.data[1] = np.inf
-
-    # Explicit continuous Fourier scaling is independent of GWAITH version.
-    data_fs = FrequencySeries(delta_t * np.fft.rfft(data.data),
-                              delta_f=delta_f, epoch=float(data.epoch))
+    psds = {}
+    for c in channels:
+        raw = psd_from_txt(args.psd_files[c] if args.psd_files else args.psd_file,
+                           flen, delta_f, delta_f, is_asd_file=False)
+        psds[c] = FrequencySeries(raw.data, delta_f=delta_f)
+        psds[c].data[:2] = np.inf
+    data_spectra = {c: FrequencySeries(delta_t*np.fft.rfft(x.data),
+                       delta_f=delta_f, epoch=float(data.epoch)) for c, x in channel_data.items()}
+    channel_data.clear()
+    del win
 
     logger.info("Beginning filtering with bank %s", args.bank_file)
 
     output_triggers = {
         "template_id": [],
         "end_time": [],
-        "snr": [],
+        "statistic": [],
     }
+    if len(channels) > 1:
+        for c in channels:
+            for field in ('statistic', 'time', 'complex_snr'):
+                output_triggers[f'{field}_{c}'] = []
     # Templates that were processed but did not yield any trigger rows (e.g. no
     # valid SNR samples in the filtering window). Logged at the end so it is
     # clear which templates are absent from the output file when a run is
@@ -266,7 +283,7 @@ def main():
     with h5py.File(args.bank_file, 'r') as bank_file:
         num_templates = len(bank_file['mass1'])
 
-    tmin, tmax = parse_template_range(num_templates, args.template_fraction_range)
+    tmin, tmax = partition_range(num_templates, args.template_fraction_range)
     logger.info("Using template range %d to %d out of %d", tmin, tmax, num_templates)
 
     with h5py.File(args.bank_file, 'r') as bank_file:
@@ -289,33 +306,33 @@ def main():
             settings = dict(delta_t=delta_t, initial_position_deg=-140.,
                             f_lower=f_lower, f_upper=args.f_upper, tdi=args.tdi_generation,
                             laser_frequency=1. if fractional_frequency else laser_frequency,
-                            pre_merger_days=1., taper_seconds=3600.)
+                            pre_merger_seconds=durations[template_idx]+3600.,
+                            post_merger_seconds=86400., taper_seconds=3600.)
             # Fixed response epoch; phase/amplitude maximisation is per channel.
             params = {**bank_wf_params, "tc": 2*86400.}
-            short = short_template(params, settings, modes=[(2, 2)])[args.channel]
+            _, merger_idx = template_geometry(params, settings)
+            waveforms = short_template(params, settings, modes=[(2, 2)])
+            if len({len(waveforms[c]) for c in channels}) != 1:
+                raise ValueError('Channel template lengths differ')
+            short = waveforms[channels[0]]
             template_duration = len(short)*delta_t
             template_start = max(valid_start_time, data_start_time+template_duration)
             template_end = min(valid_end_time, data_end_time-template_duration)
             logger.debug("Template %d valid trigger interval: %g to %g",
                          template_idx, template_start, template_end)
-            h = np.pad(short, (0, len(data)-len(short)))
+            channel_snrs = {}
             frequencies = np.arange(flen)*delta_f
-            # Place the template merger at cyclic time zero, so lag is arrival time.
-            wf_fs = FrequencySeries(delta_t*np.fft.rfft(h)*np.exp(2j*np.pi*frequencies*1.5*86400.),
-                                    delta_f=delta_f, epoch=float(data.epoch))
-            logger.debug('Computing SNR')
-            snr_ts = matched_filter_frequencyseries(
-                wf_fs,
-                data_fs,
-                psd=psd,
-                n_samples=len(data),
-                epoch=float(data.epoch),
-                low_frequency_cutoff=f_lower,
-                high_frequency_cutoff=args.f_upper,
-            )
+            for c in channels:
+                h = np.pad(waveforms[c], (0, len(data)-len(waveforms[c])))
+                wf_fs = FrequencySeries(delta_t*np.fft.rfft(h)*
+                    np.exp(2j*np.pi*frequencies*merger_idx*delta_t),
+                    delta_f=delta_f, epoch=float(data.epoch))
+                channel_snrs[c] = matched_filter_frequencyseries(wf_fs, data_spectra[c],
+                    psd=psds[c], n_samples=len(data), epoch=float(data.epoch),
+                    low_frequency_cutoff=f_lower, high_frequency_cutoff=args.f_upper)
+            del h, wf_fs
+            snr_ts = channel_snrs[channels[0]]
 
-            # Restrict to a contiguous valid time interval by truncation.
-            # This avoids artificially flat zero regions in diagnostic plots.
             start_idx = int(np.ceil((template_start - float(snr_ts.epoch)) / delta_t))
             end_idx = int(np.floor((template_end - float(snr_ts.epoch)) / delta_t)) + 1
             start_idx = max(0, start_idx)
@@ -331,13 +348,15 @@ def main():
                 continue
 
             snr_times = np.asarray(snr_ts.sample_times)[start_idx:end_idx]
-            snr_data = np.asarray(snr_ts.data)[start_idx:end_idx]
+            channel_windows = {c: np.asarray(x.data)[start_idx:end_idx] for c, x in channel_snrs.items()}
+            snr_data = (np.sqrt(sum(abs(x)**2 for x in channel_windows.values()))
+                        if len(channels) > 1 else channel_windows[channels[0]])
 
             # Find peaks in the SNR timeseries
             clustered_indices, _ = find_peaks(
                 abs(snr_data),
-                height=args.snr_threshold,
-                distance=int(args.cluster_window / delta_t)
+                height=args.statistic_threshold,
+                distance=max(1, int(args.cluster_window / delta_t))
             )
 
             snrs_out = abs(snr_data[clustered_indices])
@@ -366,8 +385,8 @@ def main():
                         marker='*',
                         zorder=50,
                     )
-                if args.snr_threshold is not None:
-                    ax.axhline(args.snr_threshold, color='r', linestyle='--', label=f'Threshold ({args.snr_threshold})')
+                if args.statistic_threshold is not None:
+                    ax.axhline(args.statistic_threshold, color='r', linestyle='--', label=f'Threshold ({args.statistic_threshold})')
                     ax.legend()
 
                 ax.set_xlabel('Time (days)')
@@ -376,7 +395,7 @@ def main():
 
                 output_path = os.path.join(
                     args.plot_snr_dir,
-                    f"snr_timeseries_{args.channel}_{template_idx}.png",
+                    f"statistic_timeseries_{args.channel}_{template_idx}.png",
                 )
                 fig.savefig(output_path, bbox_inches='tight')
                 plt.close(fig)
@@ -384,12 +403,25 @@ def main():
 
             output_triggers['template_id'] += [template_idx] * len(clustered_indices)
             output_triggers['end_time'] += times_out.tolist()
-            output_triggers['snr'] += snrs_out.tolist()
+            output_triggers['statistic'] += snrs_out.tolist()
+            if len(channels) > 1:
+                for c in channels:
+                    z = channel_windows[c][clustered_indices]
+                    output_triggers[f'statistic_{c}'] += abs(z).tolist()
+                    output_triggers[f'complex_snr_{c}'] += z.tolist()
+                    output_triggers[f'time_{c}'] += times_out.tolist()
+            del channel_windows, channel_snrs, snr_ts, snr_data, snr_times
 
     output_triggers['template_id'] = np.array(output_triggers['template_id'], dtype=np.int32)
     output_triggers['end_time'] = np.array(output_triggers['end_time'], dtype=np.float64)
-    output_triggers['snr'] = np.array(output_triggers['snr'], dtype=np.float32)
+    output_triggers['statistic'] = np.array(output_triggers['statistic'], dtype=np.float32)
 
+    if len(channels) > 1:
+        for c in channels:
+            for field in ('statistic', 'time', 'complex_snr'):
+                output_triggers[f'{field}_{c}'] = np.asarray(output_triggers[f'{field}_{c}'],
+                    dtype=complex if field == 'complex_snr' else float)
+            output_triggers[f'trigger_id_{c}'] = np.arange(len(output_triggers['statistic']), dtype=np.int64)
     # Summarise which templates are absent from the output file. A template is
     # "missing" if it was processed but produced no rows (no valid SNR samples or
     # no peak above threshold). This makes incomplete runs diagnosable: compare
@@ -413,6 +445,8 @@ def main():
 
     logger.info("Outputting to file")
     with h5py.File(args.output_file, 'w') as output_trigger_file:
+        output_trigger_file.attrs['statistic'] = 'same-time A/E quadrature SNR' if len(channels)>1 else 'single-channel SNR'
+        output_trigger_file.attrs['channels'] = channels
         output_trigger_file.attrs['analysis_intervals'] = [[valid_start_time, valid_end_time]]
         for key, value in output_triggers.items():
             output_trigger_file.create_dataset(

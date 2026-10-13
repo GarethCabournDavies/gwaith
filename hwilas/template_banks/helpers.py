@@ -53,11 +53,10 @@ def parse_mode_array(input_params):
 
 
 def waveform_from_bank(bank_file, idx, waveform_params_shared, data_length):
+    """Read bank parameters, defaulting merger time to the buffer duration in seconds."""
     bank_wf = copy.deepcopy(waveform_params_shared)
     # Update waveform params to use the ones from the bank file
-    # We use the tc provided in waveform_params_shared (which is shifted by 1 day)
-    # If not provided, fallback to data_length - 1 day
-    bank_wf['tc'] = waveform_params_shared.get('tc', data_length - 86400.0)
+    bank_wf['tc'] = waveform_params_shared.get('tc', data_length)
     bank_wf['mass1'] = bank_file['mass1'][idx]
     bank_wf['mass2'] = bank_file['mass2'][idx]
     bank_wf['inclination'] = bank_file['inclination'][idx]

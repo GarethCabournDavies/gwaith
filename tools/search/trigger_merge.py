@@ -1,126 +1,90 @@
-"Take trigger files and merge them into a single file."
-"Apply per-template clustering"
-
+"""Merge trigger partitions, preserving channel statistics and clustering loudest first."""
 import argparse
 import logging
-
+from hwilas.search.statistics import canonical_statistics, read_statistic
 import h5py
 import numpy as np
-
-
 from hwilas import add_hwilas_common_options, init_logging
 
 logger = logging.getLogger(__name__)
 
+
+def cluster_rows(rows, window, across_templates=False):
+    """Keep the loudest candidate in each time neighbourhood."""
+    rows = canonical_statistics(rows)
+    keep = np.zeros(len(rows['statistic']), dtype=bool)
+    groups = [None] if across_templates else np.unique(rows['template_id'])
+    for group in groups:
+        indices = (np.arange(len(keep)) if group is None
+                   else np.flatnonzero(rows['template_id'] == group))
+        selected = []
+        for idx in indices[np.argsort(-rows['statistic'][indices], kind='stable')]:
+            if all(abs(rows['end_time'][idx]-rows['end_time'][previous]) >= window for previous in selected):
+                selected.append(idx)
+                keep[idx] = True
+    return {key: value[keep] for key, value in rows.items()}
+
+
+def write_rows(path, rows, attrs):
+    with h5py.File(path, 'w') as f:
+        f.attrs.update(attrs)
+        for key, value in rows.items():
+            f.create_dataset(key, data=value, compression='gzip')
+
+
 def main():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description=__doc__)
     add_hwilas_common_options(parser)
-    parser.add_argument(
-        "--trigger-files",
-        nargs='+',
-        required=True,
-        help="Files with trigger information to merge",
-    )
-    parser.add_argument(
-        "--output-file",
-        required=True,
-        help="File to final list of output triggers"
-    )
-    parser.add_argument(
-        "--cluster-window",
-        type=float,
-        default=7200.0,
-        help="Cluster triggers per template within this time window in seconds"
-    )
-
+    parser.add_argument('--trigger-files', nargs='+', required=True)
+    parser.add_argument('--output-file', required=True)
+    parser.add_argument('--unclustered-output-file')
+    parser.add_argument('--cluster-window', type=float, default=7200.)
+    parser.add_argument('--cluster-across-templates', action='store_true',
+                        help='Cluster network candidates across the whole bank')
     args = parser.parse_args()
-
+    if not np.isfinite(args.cluster_window) or args.cluster_window < 0:
+        parser.error('Cluster window must be finite and nonnegative')
     init_logging(args.verbose)
-
-    all_tids = []
-    all_times = []
-    all_snrs = []
-    analysis_intervals = []
-    complete_exposure = True
-
-    for trigger_filename in args.trigger_files:
-        logger.info("Processing file %s", trigger_filename)
-        with h5py.File(trigger_filename, 'r') as trigger_file:
-            all_tids.append(trigger_file['template_id'][:])
-            all_times.append(trigger_file['end_time'][:])
-            all_snrs.append(trigger_file['snr'][:])
-            if 'analysis_intervals' in trigger_file.attrs:
-                analysis_intervals.extend(trigger_file.attrs['analysis_intervals'])
+    parts, intervals, complete, attrs = [], [], True, {}
+    for path in args.trigger_files:
+        with h5py.File(path) as f:
+            part = {key: f[key][:] for key in f if isinstance(f[key], h5py.Dataset)}
+            part = canonical_statistics(part)
+            if not {'template_id', 'end_time', 'statistic'} <= part.keys():
+                raise ValueError('Missing trigger columns')
+            if parts and part.keys() != parts[0].keys():
+                raise ValueError('Trigger partition schemas differ')
+            if any(value.ndim != 1 or len(value) != len(part['statistic']) for value in part.values()):
+                raise ValueError('Trigger columns must have equal one-dimensional lengths')
+            if not np.isfinite(part['statistic']).all() or not np.isfinite(part['end_time']).all():
+                raise ValueError('Trigger times and statistics must be finite')
+            parts.append(part)
+            if 'analysis_intervals' in f.attrs:
+                intervals.extend(f.attrs['analysis_intervals'])
             else:
-                complete_exposure = False
+                complete = False
+            for key in ('statistic', 'channels'):
+                if key in f.attrs:
+                    if key in attrs and not np.array_equal(attrs[key], f.attrs[key]):
+                        raise ValueError('Trigger statistics or channels differ between partitions')
+                    attrs[key] = f.attrs[key]
+    rows = {key: np.concatenate([p[key] for p in parts]) for key in parts[0]}
+    order = np.lexsort((rows['end_time'], rows['template_id']))
+    rows = {key: values[order] for key, values in rows.items()}
+    # Partition-local IDs become unique IDs in the merged candidate list.
+    for key in rows:
+        if key.startswith('trigger_id_'):
+            rows[key] = np.arange(len(order), dtype=np.int64)
+    if complete:
+        attrs['analysis_intervals'] = np.asarray(intervals).reshape(-1, 2)
+    if args.unclustered_output_file:
+        write_rows(args.unclustered_output_file, rows, attrs)
+    clustered = cluster_rows(rows, args.cluster_window, args.cluster_across_templates)
+    attrs['cluster_window'] = args.cluster_window
+    attrs['cluster_across_templates'] = args.cluster_across_templates
+    write_rows(args.output_file, clustered, attrs)
+    logger.info('Merged %d triggers; retained %d after clustering', len(rows['statistic']), len(clustered['statistic']))
 
-    if len(all_tids) == 0:
-        raise ValueError("No trigger files provided")
 
-    merged_tids = np.concatenate(all_tids).astype(np.int32, copy=False)
-    merged_times = np.concatenate(all_times).astype(np.float64, copy=False)
-    merged_snrs = np.concatenate(all_snrs).astype(np.float64, copy=False)
-
-    logger.info("Total template ids before clustering: %d", np.unique(merged_tids).size)
-    logger.info("Total triggers before clustering: %d", merged_tids.size)
-
-    # Sort by template id then time so downstream coincidence searchsorted logic
-    # sees monotonic per-template times.
-    order = np.lexsort((merged_times, merged_tids))
-    merged_tids = merged_tids[order]
-    merged_times = merged_times[order]
-    merged_snrs = merged_snrs[order]
-
-    keep = np.zeros(merged_tids.size, dtype=bool)
-    for template_id in np.unique(merged_tids):
-        indices = np.where(merged_tids == template_id)[0]
-        if indices.size == 0:
-            continue
-        times = merged_times[indices]
-        snrs = merged_snrs[indices]
-        local_keep = np.ones(indices.size, dtype=bool)
-        loudest_first = np.argsort(snrs)[::-1]
-        for local_idx in loudest_first:
-            if not local_keep[local_idx]:
-                continue
-            within = np.abs(times - times[local_idx]) < args.cluster_window
-            local_keep[within] = False
-            local_keep[local_idx] = True
-        keep[indices[local_keep]] = True
-
-    merged_tids = merged_tids[keep]
-    merged_times = merged_times[keep]
-    merged_snrs = merged_snrs[keep]
-
-    logger.info("Total triggers after clustering: %d", merged_tids.size)
-
-    with h5py.File(args.output_file, 'w') as output_file:
-        if complete_exposure:
-            output_file.attrs['analysis_intervals'] = np.asarray(analysis_intervals).reshape(-1, 2)
-        n_triggers = merged_tids.size
-        tid_ds = output_file.create_dataset(
-            "template_id",
-            shape=(n_triggers,),
-            dtype=np.int32,
-            compression='gzip',
-        )
-        time_ds = output_file.create_dataset(
-            "end_time",
-            shape=(n_triggers,),
-            dtype=float,
-            compression='gzip',
-        )
-        snr_ds = output_file.create_dataset(
-            "snr",
-            shape=(n_triggers,),
-            dtype=float,
-            compression='gzip',
-        )
-        tid_ds[:] = merged_tids
-        time_ds[:] = merged_times
-        snr_ds[:] = merged_snrs
-
-    logger.info("Done!")
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

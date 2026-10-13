@@ -1,19 +1,25 @@
 """
-Optimise SNR for peaks found in coincidences
+Optimise the physical-fit statistic for selected search candidates.
 """
 
 import argparse
 import copy
+import hashlib
+import json
+from pathlib import Path
+from functools import partial
 from concurrent.futures import ProcessPoolExecutor
 from multiprocessing import get_context
 import logging
+from hwilas.search.statistics import read_statistic
 import h5py
 import numpy as np
 import pyswarms as ps
+from tqdm.auto import tqdm
 
 from gwaith.types import TimeSeries, FrequencySeries
 from scipy.fft import next_fast_len
-from scipy.optimize import minimize
+from scipy.optimize import minimize, differential_evolution
 from scipy.signal import detrend
 from scipy.signal.windows import tukey
 from hwilas.waveforms.short_fastbhb import template
@@ -29,12 +35,111 @@ from hwilas.psd.read import from_txt as psd_from_txt
 DEFAULT_HM_MODE_ARRAY = [(2, 2), (2, 1), (3, 3), (3, 2), (4, 4), (4, 3)]
 from hwilas.types import KeyValueAction
 from hwilas.search.rounds import previous_window_flags
+from hwilas.search.sky_modes import sky_mode_vectors
+from hwilas.search.partitions import event_partition, parse_fraction
 
 logger = logging.getLogger(__name__)
 
 
 PARAMETERS = ('mchirp', 'eta', 'spin1z', 'spin2z', 'eclipticlongitude',
               'eclipticlatitude', 'inclination', 'tc', 'polarization', 'coa_phase')
+
+
+def _de_objective(position, objective_kwargs):
+    """Scalar physical-fit objective, pickleable for spawned DE workers."""
+    return -compute_statistic_core(position, **objective_kwargs)
+
+
+def optimise_population(args, population, lower, upper, kwargs, event_index):
+    """Run the selected population optimiser with the shared physical objective."""
+    sweep_every = getattr(args, 'sky_sweep_every', 0)
+    def sweep(position, cost, pool=None):
+        branches = sky_mode_vectors(position, kwargs['tc_reference'])
+        valid = np.all((branches >= lower) & (branches <= upper), axis=1)
+        branches = branches[valid]
+        objective = partial(_de_objective, objective_kwargs=kwargs)
+        costs = np.asarray(list(map(objective, branches)) if pool is None else pool.map(objective, branches))
+        winner = int(np.argmin(costs)) if len(costs) else None
+        if winner is not None and np.isfinite(costs[winner]) and costs[winner] < cost:
+            logger.info('Event %d sky-mode sweep improved statistic %.6g -> %.6g',
+                        event_index,-cost,-costs[winner])
+            return float(costs[winner]), branches[winner].copy()
+        return cost, np.asarray(position).copy()
+    if sweep_every:
+        branches = sky_mode_vectors(population[0], kwargs['tc_reference'])
+        branches = branches[np.all((branches >= lower) & (branches <= upper), axis=1)]
+        count = min(len(branches), len(population))
+        if count:
+            selected = np.linspace(0, len(branches)-1, count, dtype=int)
+            population[:count] = branches[selected]
+    if args.optimizer == 'pso':
+        np.random.seed(args.seed+event_index)
+        optimiser = ps.single.GlobalBestPSO(n_particles=args.n_particles, dimensions=len(lower),
+            options={'c1':.5, 'c2':.3, 'w':.9}, bounds=(lower, upper), init_pos=population)
+        optimiser.name = f'Event {event_index} PSO'
+        if sweep_every:
+            original_hook = optimiser.rep.hook
+            iteration = 0
+            def sky_hook(**values):
+                nonlocal iteration
+                iteration += 1
+                if iteration % sweep_every == 0 or iteration == args.n_iterations:
+                    swarm = optimiser.swarm
+                    cost, position = sweep(swarm.best_pos, swarm.best_cost)
+                    if cost < swarm.best_cost:
+                        index = int(np.argmin(swarm.pbest_cost))
+                        swarm.pbest_pos[index], swarm.pbest_cost[index] = position, cost
+                        swarm.position[index], swarm.current_cost[index] = position, cost
+                        swarm.velocity[index] = 0.
+                        swarm.best_pos, swarm.best_cost = position.copy(), np.float64(cost)
+                    values['best_cost'] = swarm.best_cost
+                return original_hook(**values)
+            optimiser.rep.hook = sky_hook
+        return optimiser.optimize(compute_minus_statistic, iters=args.n_iterations,
+            n_processes=args.n_processes if args.n_processes>1 else None, verbose=True, **kwargs)
+    objective = partial(_de_objective, objective_kwargs=kwargs)
+    options = dict(bounds=list(zip(lower, upper)), init=population,
+        maxiter=args.n_iterations, seed=args.seed+event_index, strategy=args.de_strategy,
+        mutation=tuple(args.de_mutation), recombination=args.de_recombination,
+        tol=args.de_tol, atol=args.de_atol, polish=False, updating='deferred')
+    # Both serial and parallel DE update once per generation for repeatability.
+    with tqdm(total=args.n_iterations, desc=f'Event {event_index} DE', unit='generation') as progress:
+        def update_progress(intermediate_result):
+            progress.update(1)
+            progress.set_postfix(statistic=-intermediate_result.fun)
+        options['callback'] = update_progress
+        def run_de(pool=None):
+            remaining, iteration, evaluations = args.n_iterations, 0, 0
+            settings = options.copy()
+            # Retain the population between sweeps; share one RNG stream across blocks.
+            settings['seed'] = np.random.default_rng(args.seed+event_index)
+            while remaining:
+                settings['maxiter'] = min(sweep_every, remaining) if sweep_every else remaining
+                result = differential_evolution(objective, workers=pool.map if pool else 1, **settings)
+                evaluations += result.nfev
+                remaining -= result.nit
+                iteration += result.nit
+                if sweep_every:
+                    cost, position = sweep(result.x, result.fun, pool)
+                    improved = cost < result.fun
+                    result.fun, result.x = cost, position
+                    settings['init'] = result.population.copy()
+                    settings['init'][np.argmax(result.population_energies)] = position
+                else:
+                    improved = False
+                if result.nit == 0 or (result.success and not improved):
+                    break
+            result.nit = iteration
+            result.nfev = evaluations
+            return result
+        if args.n_processes > 1:
+            with get_context('spawn').Pool(args.n_processes) as pool:
+                result = run_de(pool)
+        else:
+            result = run_de()
+    logger.debug('DE event %d: generations=%d evaluations=%d converged=%s; %s',
+                 event_index, result.nit, result.nfev, result.success, result.message)
+    return result.fun, result.x
 
 
 def _data_frequencyseries(data):
@@ -136,12 +241,12 @@ def profile_physical_fit(v, data, psd, waveform_params_shared, optimisation_chan
         return -np.inf,full
     first = next(iter(data.values()))
     data_fs = waveform_params_shared.get('data_fs') or _data_frequencyseries(data)
-    rho,full[7] = profile_merger_time(wf,data_fs,psd,optimisation_channels,
+    fit_stat,full[7] = profile_merger_time(wf,data_fs,psd,optimisation_channels,
                                     len(first),first.delta_t,full[7],time_bounds)
-    return rho,full
+    return fit_stat,full
 
 
-def compute_network_snr_core(v, data, psd, waveform_params_shared, optimisation_channels,
+def compute_statistic_core(v, data, psd, waveform_params_shared, optimisation_channels,
                              raise_err=False, tc_reference=None, time_bounds=None):
     if time_bounds is not None:
         return profile_physical_fit(v,data,psd,waveform_params_shared,optimisation_channels,
@@ -153,9 +258,9 @@ def compute_network_snr_core(v, data, psd, waveform_params_shared, optimisation_
     return coherent_fit(wf,data_fs,psd,optimisation_channels)[0]
 
 
-def get_snr_and_distance_factor(wf, data, psd, optimisation_channels):
-    rho, amp = coherent_fit(wf,_data_frequencyseries(data),psd,optimisation_channels)
-    return rho, 1/abs(amp) if abs(amp)>0 else np.inf
+def get_statistic_and_distance_factor(wf, data, psd, optimisation_channels):
+    fit_stat, amp = coherent_fit(wf,_data_frequencyseries(data),psd,optimisation_channels)
+    return fit_stat, 1/abs(amp) if abs(amp)>0 else np.inf
 
 
 def shift_and_normalise_waveform(wf_fd, coalescence_in_segment, data, psd,
@@ -163,14 +268,14 @@ def shift_and_normalise_waveform(wf_fd, coalescence_in_segment, data, psd,
     """Normalise a cyclic-zero-merger FD template for plotting."""
     first = next(iter(data.values()))
     aligned = {c:wf_fd[c].cyclic_time_shift(coalescence_in_segment) for c in output_channels}
-    rho, amp = coherent_fit(aligned,_data_frequencyseries(data),psd,optimisation_channels)
+    fit_stat, amp = coherent_fit(aligned,_data_frequencyseries(data),psd,optimisation_channels)
     out = {c:TimeSeries(np.fft.irfft(amp*aligned[c].data,n=len(first))/delta_t,
                        epoch=first.epoch,delta_t=delta_t) for c in output_channels}
-    return out,rho,1/abs(amp) if abs(amp)>0 else np.inf
+    return out,fit_stat,1/abs(amp) if abs(amp)>0 else np.inf
 
 
-def compute_minus_network_snr(positions, **kwargs):
-    return np.array([-compute_network_snr_core(v,**kwargs) for v in positions])
+def compute_minus_statistic(positions, **kwargs):
+    return np.array([-compute_statistic_core(v,**kwargs) for v in positions])
 
 
 def load_arguments():
@@ -252,10 +357,10 @@ def load_arguments():
         "Default 30 days."
     )
     parser.add_argument(
-        "--n-particles",
+        "--n-particles", "--population-size",
         type=int,
         default=100,
-        help="Number of particles to use in the optimiser"
+        help="Actual population size for PSO or DE (not a per-dimension multiplier)"
     )
     parser.add_argument(
         "--seed",
@@ -305,29 +410,60 @@ def load_arguments():
     parser.add_argument("--psd-files",nargs='+',action=KeyValueAction,
                         help="Channel-specific PSDs as channel:filename pairs")
     parser.add_argument("--f-upper",type=float,default=.09)
-    parser.add_argument("--n-iterations",type=int,default=100)
+    parser.add_argument('--optimizer', '--optimiser', choices=['pso', 'de'], type=str.lower,
+                        default='pso', help='Population optimiser; default pso')
+    parser.add_argument('--de-strategy', default='best1bin', choices=[
+        'best1bin', 'best1exp', 'rand1bin', 'rand1exp', 'rand2bin', 'rand2exp',
+        'randtobest1bin', 'randtobest1exp', 'currenttobest1bin', 'currenttobest1exp',
+        'best2bin', 'best2exp'])
+    parser.add_argument('--de-mutation', type=float, nargs=2, default=(.5, 1.),
+                        metavar=('MIN', 'MAX'), help='DE mutation dithering range; default 0.5 1.0')
+    parser.add_argument('--de-recombination', type=float, default=.7)
+    parser.add_argument('--de-tol', type=float, default=.01)
+    parser.add_argument('--de-atol', type=float, default=0.)
+    parser.add_argument('--sky-sweep-every', type=int, default=20,
+                        help='Explore gwreparam sky/helicity branches every N iterations/generations and at the end; default 20; 0 disables')
+    parser.add_argument("--n-iterations",type=int,default=100,
+                        help='Maximum PSO iterations or DE generations')
     parser.add_argument("--n-processes",type=int,default=1,
-                        help="Particle workers within one event; default 1")
+                        help="Population workers within one event, for PSO or DE; default 1")
     parser.add_argument("--event-workers",type=int,default=1,
                         help="Concurrent complete event fits, including local refinement; default 1")
+    parser.add_argument('--event-fraction', default='0/1', metavar='N/M',
+                        help='Analyse interleaved group N of M (0 <= N < M); default 0/1')
     parser.add_argument("--polish-evaluations",type=int,default=1000,
-                        help="Maximum bounded local-refinement evaluations after the swarm; 0 disables it")
+                        help="Maximum bounded local-refinement evaluations after PSO or DE; 0 disables it")
     parser.add_argument("--phase-seed-count",type=int,default=16,
                         help="Physical coalescence phases checked before the swarm; default 16")
     parser.add_argument("--previous-parameter-file",
                         help="Flag candidates within the saved optimisation windows of this earlier round")
     args = parser.parse_args()
+    try:
+        event_partition(0, args.event_fraction)
+    except ValueError as error:
+        parser.error(str(error))
     if args.psd_file is None and args.psd_files is None:
         parser.error("Provide --psd-file or --psd-files")
     if args.polish_evaluations < 0:
         parser.error("Polish evaluations must be nonnegative")
+    if args.sky_sweep_every < 0:
+        parser.error('Sky sweep interval must be nonnegative')
     if args.statistic_threshold < 0 or args.minimum_peak_separation < 0:
-        parser.error("SNR threshold and minimum separation must be nonnegative")
+        parser.error("Statistic threshold and minimum separation must be nonnegative")
     if min(args.n_particles,args.n_iterations,args.n_processes,args.event_workers,args.phase_seed_count)<1:
         parser.error("Particle, iteration and process counts must be positive")
 
     if args.event_workers>1 and args.n_processes>1:
         parser.error("Use event workers or particle workers, not both")
+    if args.optimizer == 'de':
+        if args.n_particles < 5:
+            parser.error('DE requires a population of at least 5')
+        if args.de_strategy.startswith('rand2') and args.n_particles < 6:
+            parser.error('DE rand2 strategies require a population of at least 6')
+        controls = [*args.de_mutation, args.de_recombination, args.de_tol, args.de_atol]
+        if (not np.isfinite(controls).all() or not 0 <= args.de_mutation[0] < args.de_mutation[1] < 2
+                or not 0 <= args.de_recombination <= 1 or min(args.de_tol, args.de_atol) < 0):
+            parser.error('Invalid DE mutation, recombination or convergence tolerances')
 
     args.fit_channels = args.fit_channels or args.optimisation_channels
     if args.psd_files and any(c not in args.psd_files for c in args.fit_channels):
@@ -351,73 +487,78 @@ def get_events_to_optimise(args):
         
         for channel in args.optimisation_channels:
             coincs[f"trigger_id_{channel}"] = input_file[f"trigger_id_{channel}"][:]
-            coincs[f"snr_{channel}"] = input_file[f"snr_{channel}"][:]
+            if f"statistic_{channel}" in input_file or f"snr_{channel}" in input_file:
+                coincs[f"statistic_{channel}"] = read_statistic(input_file, channel)
             coincs[f"time_{channel}"] = input_file[f"time_{channel}"][:]
+        # Use the stored ranking statistic, or reconstruct it when absent.
+        if 'statistic' in input_file:
+            candidate_stat = input_file['statistic'][:]
+        elif 'snr' in input_file:
+            candidate_stat = input_file['snr'][:]
+        else:
+            candidate_stat = np.sqrt(sum(coincs[f'statistic_{c}']**2 for c in args.optimisation_channels))
 
-    coinc_stat = (
-        coincs[f'snr_{args.optimisation_channels[0]}'] ** 2 + coincs[f'snr_{args.optimisation_channels[1]}'] ** 2
-    ) ** 0.5
-    # The mean of the two channel times is only used to set the minimum distance
-    # between events chosen for optimisation. The per-channel trigger times are
-    # kept separately and used for the initial point / plot, so that the SNR in
-    # each channel at its own peak time is not thrown away.
-    coinc_time = (
+    candidate_stat = np.asarray(candidate_stat, dtype=float)
+    if candidate_stat.shape != coincs['template_id'].shape or not np.isfinite(candidate_stat).all():
+        raise ValueError('Candidate statistics must be finite and match the event count')
+    # Channel times remain available for initialisation; their mean sets event separation.
+    candidate_time = (
         coincs[f'time_{args.optimisation_channels[0]}'] + coincs[f'time_{args.optimisation_channels[1]}']
     ) / 2
-    coinc_times_by_channel = {
+    candidate_times_by_channel = {
         channel: coincs[f"time_{channel}"] for channel in args.optimisation_channels
     }
-    coinc_tempid = coincs["template_id"]
-    logger.info("%d events in file", len(coinc_stat))
+    candidate_template_id = coincs["template_id"]
+    logger.info("%d events in file", len(candidate_stat))
 
     # remove anything not above the statistic threshold
-    above_threshold = coinc_stat >= args.statistic_threshold
-    coinc_stat = coinc_stat[above_threshold]
-    coinc_time = coinc_time[above_threshold]
+    above_threshold = candidate_stat >= args.statistic_threshold
+    candidate_stat = candidate_stat[above_threshold]
+    candidate_time = candidate_time[above_threshold]
     for channel in args.optimisation_channels:
-        coinc_times_by_channel[channel] = (
-            coinc_times_by_channel[channel][above_threshold]
+        candidate_times_by_channel[channel] = (
+            candidate_times_by_channel[channel][above_threshold]
         )
-    coinc_tempid = coinc_tempid[above_threshold]
+    candidate_template_id = candidate_template_id[above_threshold]
     logger.info(
         "%d events remain after thresholding on statistic value %.1f",
-        len(coinc_stat),
+        len(candidate_stat),
         args.statistic_threshold
     )
 
     # Keep loudest-first representatives without confusing sorted and original indices.
     kept = []
-    for i in np.argsort(-coinc_stat):
-        if all(abs(coinc_time[i]-coinc_time[j]) >= args.minimum_peak_separation for j in kept):
+    for i in np.argsort(-candidate_stat):
+        if all(abs(candidate_time[i]-candidate_time[j]) >= args.minimum_peak_separation for j in kept):
             kept.append(int(i))
-    coinc_stat, coinc_time, coinc_tempid = coinc_stat[kept], coinc_time[kept], coinc_tempid[kept]
-    coinc_times_by_channel = {c:t[kept] for c,t in coinc_times_by_channel.items()}
+    candidate_stat, candidate_time, candidate_template_id = candidate_stat[kept], candidate_time[kept], candidate_template_id[kept]
+    candidate_times_by_channel = {c:t[kept] for c,t in candidate_times_by_channel.items()}
 
     logger.info(
         "%d events remain after minimum separation requirement",
-        len(coinc_stat)
+        len(candidate_stat)
     )
 
     # Sort back into statistic order
-    stat_sort = np.argsort(coinc_stat)[::-1]
-    coinc_stat = np.array(coinc_stat[stat_sort])
-    coinc_time = np.array(coinc_time[stat_sort])
+    stat_sort = np.argsort(candidate_stat)[::-1]
+    candidate_stat = np.array(candidate_stat[stat_sort])
+    candidate_time = np.array(candidate_time[stat_sort])
     for channel in args.optimisation_channels:
-        coinc_times_by_channel[channel] = (
-            np.array(coinc_times_by_channel[channel][stat_sort])
+        candidate_times_by_channel[channel] = (
+            np.array(candidate_times_by_channel[channel][stat_sort])
         )
-    coinc_tempid = np.array(coinc_tempid[stat_sort])
+    candidate_template_id = np.array(candidate_template_id[stat_sort])
 
-    for i, (time, stat, tempid) in enumerate(zip(coinc_time, coinc_stat, coinc_tempid)):
+    for i, (time, stat, tempid) in enumerate(zip(candidate_time, candidate_stat, candidate_template_id)):
         logger.debug(
             "Event %d / %d at time %.1f days with statistic %.3f, template %d",
-            i+1, len(coinc_stat),
+            i+1, len(candidate_stat),
             time / 86400,
             stat,
             tempid
         )
 
-    return coinc_stat, coinc_time, coinc_times_by_channel, coinc_tempid
+    return candidate_stat, candidate_time, candidate_times_by_channel, candidate_template_id
 
 _BANK_PARAMETERS = [
     'mass1',
@@ -438,14 +579,14 @@ _PHASE_FIELD_CANDIDATES = (
     'phi_ref',
 )
 
-def get_bank_parameters(bank_filename, coinc_tempid):
+def get_bank_parameters(bank_filename, candidate_template_id):
     logger.info("Getting bank parameters for the top events")
 
     # template IDs need to be unique for reading from the file,
     # but by using return_inverse=True
     # we can get things back in the original order
     unique_tempids, inverse_indices = np.unique(
-        coinc_tempid,
+        candidate_template_id,
         return_inverse=True
     )
 
@@ -466,7 +607,7 @@ def get_bank_parameters(bank_filename, coinc_tempid):
             unique_phase = bank_file[phase_field][unique_tempids]
             phase = unique_phase[inverse_indices]
         else:
-            phase = np.zeros(len(coinc_tempid), dtype=np.float64)
+            phase = np.zeros(len(candidate_template_id), dtype=np.float64)
             logger.warning(
                 "No coalescence phase field found in bank file. "
                 "Falling back to phase=0 for optimisation waveforms. "
@@ -574,16 +715,16 @@ def _optimise_event(task):
                   tc_reference=seed[7],time_bounds=(lower[7],upper[7]))
     # A physical phase seed avoids relying on an arbitrary complex rotation.
     phase_candidates = [seed[9], *np.linspace(lower[9],upper[9],args.phase_seed_count,endpoint=False)]
-    initial_snr = -np.inf
+    initial_fit_stat = -np.inf
     for phase in phase_candidates:
         candidate = seed.copy()
         candidate[9] = phase
-        rho,candidate = profile_physical_fit(candidate,**kwargs,raise_err=True)
-        if rho>initial_snr:
-            initial_snr,seed = rho,candidate
-    if not np.isfinite(initial_snr) or initial_snr<=0:
-        raise ValueError('Initial template has no positive physical SNR')
-    initial_snr = compute_network_snr_core(seed,data,psds,shared,args.fit_channels,raise_err=True)
+        fit_stat,candidate = profile_physical_fit(candidate,**kwargs,raise_err=True)
+        if fit_stat>initial_fit_stat:
+            initial_fit_stat,seed = fit_stat,candidate
+    if not np.isfinite(initial_fit_stat) or initial_fit_stat<=0:
+        raise ValueError('Initial template has no positive physical-fit statistic')
+    initial_fit_stat = compute_statistic_core(seed,data,psds,shared,args.fit_channels,raise_err=True)
     kwargs['tc_reference'] = seed[7]
     shape_indices = [i for i,p in enumerate(PARAMETERS) if p!='tc']
     shape_lower,shape_upper = np.asarray(lower)[shape_indices],np.asarray(upper)[shape_indices]
@@ -600,42 +741,47 @@ def _optimise_event(task):
     initial_chi_eff = chi_eff_from_component_spins(*seed_masses,seed[2],seed[3])
     logger.info(
         'Event %d / %d before optimisation: time=%.3f s (%.6f days), '
-        'initial template SNR (higher-order modes)=%.3f, chirp mass=%.6g Msun, chi_eff=%.6f; '
-        'coincidence quadrature-sum SNR ((2,2) only)=%.3f, template=%d',
-        idx+1, count, seed[7], seed[7]/86400., initial_snr, seed[0], initial_chi_eff,
+        'initial template statistic=%.3f, chirp mass=%.6g Msun, chi_eff=%.6f; '
+        'candidate statistic=%.3f, template=%d',
+        idx, count, seed[7], seed[7]/86400., initial_fit_stat, seed[0], initial_chi_eff,
         statistic, template_id)
     if previous_flag:
         logger.info('Event %d / %d FLAG: coincidence lies inside first-round event %d optimisation window',
-                    idx+1, count, previous_index+1)
-    np.random.seed(args.seed+idx)
-    optimiser = ps.single.GlobalBestPSO(n_particles=args.n_particles,dimensions=len(shape_indices),
-        options={'c1':.5,'c2':.3,'w':.9},bounds=(shape_lower,shape_upper),init_pos=population)
-    cost, best = optimiser.optimize(compute_minus_network_snr,iters=args.n_iterations,
-        n_processes=args.n_processes if args.n_processes>1 else None,verbose=False,**kwargs)
-    if not np.isfinite(cost) or -cost<initial_snr:
+                    idx, count, previous_index)
+    logger.info('Event %d / %d optimiser=%s, population=%d, iterations=%d, workers=%d',
+                idx,count,args.optimizer,args.n_particles,args.n_iterations,args.n_processes)
+    cost, best = optimise_population(args,population,shape_lower,shape_upper,kwargs,idx)
+    if not np.isfinite(cost) or -cost<initial_fit_stat:
         best = shape_seed
     polish_evaluations,polish_success = 0,False
     if args.polish_evaluations:
         # Normalise parameter units for a bounded local refinement.
         width = shape_upper-shape_lower
-        def local_objective(position):
-            return -compute_network_snr_core(shape_lower+position*width,**kwargs)
+        def objective_value(position):
+            return -compute_statistic_core(shape_lower+position*width,**kwargs)
         position = np.clip((best-shape_lower)/width,0,1)
-        local = minimize(local_objective,position,method='Nelder-Mead',
-            bounds=[(0.,1.)]*len(position),
-            options=dict(maxfev=args.polish_evaluations,xatol=1e-5,fatol=1e-4))
+        initial_cost = objective_value(position)
+        with tqdm(total=args.polish_evaluations, desc=f'Event {idx} refinement', unit='evaluation') as progress:
+            def local_objective(position):
+                value = objective_value(position)
+                progress.update(1)
+                return value
+            local = minimize(local_objective,position,method='Nelder-Mead',
+                bounds=[(0.,1.)]*len(position),
+                options=dict(maxfev=args.polish_evaluations,xatol=1e-5,fatol=1e-4))
         polish_evaluations,polish_success = local.nfev,bool(local.success)
-        if np.isfinite(local.fun) and local.fun<local_objective(position):
+        if np.isfinite(local.fun) and local.fun<initial_cost:
             best = shape_lower+local.x*width
-        logger.debug('Event %d / %d local refinement: %d evaluations, converged=%s',
-                     idx+1,count,polish_evaluations,polish_success)
+        logger.info('Event %d / %d refinement complete: %d / %d evaluations, converged=%s; %s',
+                    idx,count,polish_evaluations,args.polish_evaluations,
+                    polish_success,local.message)
     _,best = profile_physical_fit(best,**kwargs,raise_err=True)
     wf = build_aligned_waveform(best,data,shared,raise_err=True)
-    rho,amplitude = coherent_fit(wf,shared['data_fs'],psds,args.fit_channels)
-    if amplitude<=0 or rho<initial_snr:
+    fit_stat,amplitude = coherent_fit(wf,shared['data_fs'],psds,args.fit_channels)
+    if amplitude<=0 or fit_stat<initial_fit_stat:
         best = seed
         wf = build_aligned_waveform(best,data,shared,raise_err=True)
-        rho,amplitude = coherent_fit(wf,shared['data_fs'],psds,args.fit_channels)
+        fit_stat,amplitude = coherent_fit(wf,shared['data_fs'],psds,args.fit_channels)
     if amplitude<=0:
         raise ValueError('No positive distance scale for fitted event')
     fitted_distance = initial['distance']/amplitude
@@ -643,15 +789,15 @@ def _optimise_event(task):
     # Predict every output channel from the same distance and physical phase.
     wf = build_aligned_waveform(best,data,physical_shared,raise_err=True,
                                 waveform_channels=args.output_timeseries_channels)
-    rho,_ = coherent_fit(wf,shared['data_fs'],psds,args.fit_channels)
+    fit_stat,_ = coherent_fit(wf,shared['data_fs'],psds,args.fit_channels)
     segments = {c:(np.fft.irfft(wf[c].data,n=n)/dt)[:j1-j0]
                 for c in args.output_timeseries_channels}
     record = dict(zip(PARAMETERS,best))
     record['mass1'],record['mass2'] = mass1_mass2_from_mchirp_eta(best[0],best[1])
-    record.update(initial_template_id=template_id,initial_stat=statistic,optimised_stat=rho,
+    record.update(global_event_index=idx,initial_template_id=template_id,initial_stat=statistic,optimised_stat=fit_stat,
                   distance=fitted_distance,
                   amplitude_phase=0., initial_time=float(time),
-                  initial_fit_snr=initial_snr,
+                  initial_fit_stat=initial_fit_stat,
                   optimisation_window_start=event_epoch,
                   optimisation_window_end=source_epoch+j1*dt,
                   in_previous_window=previous_flag, previous_event_index=previous_index,
@@ -660,8 +806,8 @@ def _optimise_event(task):
         dict(f_lower=args.f_lower, f_upper=args.f_upper, pre_merger_days=1.))
     logger.info(
         'Event %d / %d after optimisation: time=%.3f s (%.6f days), '
-        'optimised SNR (higher-order modes)=%.3f, chirp mass=%.6g Msun, chi_eff=%.6f',
-        idx+1, count, best[7], best[7]/86400., rho, best[0],
+        'optimised statistic=%.3f, chirp mass=%.6g Msun, chi_eff=%.6f',
+        idx, count, best[7], best[7]/86400., fit_stat, best[0],
         chi_eff_from_component_spins(record['mass1'],record['mass2'],best[2],best[3]))
     return record, event_epoch, segments
 
@@ -669,11 +815,22 @@ def _optimise_event(task):
 def main():
     args = load_arguments()
     stats, times, channel_times, ids = get_events_to_optimise(args)
+    selected_indices = event_partition(len(times), args.event_fraction)
     previous_flags, previous_indices = previous_window_flags(times, args.previous_parameter_file)
     bank = get_bank_parameters(args.bank_file, ids)
+    # All partitions use global ranks for seeds and select from the same candidate list.
+    signature = hashlib.sha256()
+    settings = {k:v for k,v in vars(args).items() if k not in
+                ('event_fraction', 'output_parameter_file', 'output_timeseries_file',
+                 'event_workers', 'n_processes', 'verbose')}
+    signature.update(json.dumps(settings, sort_keys=True, default=str).encode())
+    for values in (stats, times, ids, *(bank[k] for k in sorted(bank))):
+        signature.update(np.asarray(values).tobytes())
     starts, ends = [], []
     metadata = None
     for path in args.data_files:
+        stamp = Path(path).stat()
+        signature.update(json.dumps([str(Path(path).resolve()),stamp.st_size,stamp.st_mtime_ns]).encode())
         with h5py.File(path, 'r') as f:
             dt = float(f.attrs['delta_t'])
             if metadata is not None and dt != metadata['delta_t']:
@@ -681,27 +838,29 @@ def main():
             metadata = dict(f.attrs)
             starts.append(float(f.attrs['epoch']))
             ends.append(starts[-1]+len(f[args.optimisation_channels[0]])*dt)
+    optimisation_signature = signature.hexdigest()
     epoch, end = min(starts), max(ends)
     signals = {c:np.zeros(round((end-epoch)/dt)) for c in args.output_timeseries_channels}
     records = []
     chunks = identify_file_of_coinc(np.array(starts), np.array(ends), times)
-    logger.info('Optimising %d events in decreasing coincident network SNR order', len(times))
+    logger.info('Event fraction %s: optimising %d of %d globally selected events',
+                args.event_fraction,len(selected_indices),len(times))
     tasks = [
         (args, idx, len(times), args.data_files[chunks[idx]], float(times[idx]),
          float(channel_times[args.optimisation_channels[0]][idx]), int(ids[idx]), float(stats[idx]),
          {p:float(values[idx]) for p,values in bank.items()}, dt,
          bool(previous_flags[idx]), int(previous_indices[idx]))
-        for idx in range(len(times))
+        for idx in selected_indices
     ]
     def collect(results):
-        # Combine in SNR order so seeded fits and overlapping sums are reproducible.
+        # Combine in candidate-statistic order for reproducible seeds and overlapping sums.
         for record, event_epoch, segments in results:
             offset = round((event_epoch-epoch)/dt)
             for c, segment in segments.items():
                 signals[c][offset:offset+len(segment)] += segment
             records.append(record)
     if args.event_workers>1 and tasks:
-        logger.info('Dispatching events in decreasing SNR order to %d workers; completion order may differ',
+        logger.info('Dispatching events in decreasing candidate statistic order to %d workers; completion order may differ',
                     args.event_workers)
         # Spawn workers with independent HDF5 handles and per-event random seeds.
         with ProcessPoolExecutor(max_workers=min(args.event_workers,len(tasks)),
@@ -719,22 +878,33 @@ def main():
                            initial_position_deg=-140., mode_array=DEFAULT_HM_MODE_ARRAY,
                            fit_channels=args.fit_channels,local_refinement_max_evaluations=args.polish_evaluations,
                            event_workers=args.event_workers,particle_workers=args.n_processes,
+                           optimizer=args.optimizer, population_size=args.n_particles,
+                           max_iterations=args.n_iterations, seed=args.seed,
+                           event_fraction=args.event_fraction,
+                           selected_event_count=len(times), optimisation_signature=optimisation_signature,
+                           sky_sweep_every=args.sky_sweep_every,
+                           optimisation_statistic='physical_network_snr',
+                           de_strategy=args.de_strategy, de_mutation=args.de_mutation,
+                           de_recombination=args.de_recombination,
+                           de_tol=args.de_tol, de_atol=args.de_atol,
                            amplitude_model='positive physical distance; physical coalescence phase')
             if args.previous_parameter_file:
                 f.attrs['previous_parameter_file'] = args.previous_parameter_file
-            for key in (*PARAMETERS,'mass1','mass2','initial_template_id','initial_stat','optimised_stat',
-                        'distance','amplitude_phase','initial_time','initial_fit_snr','f_lower',
+            for key in (*PARAMETERS,'mass1','mass2','global_event_index','initial_template_id','initial_stat','optimised_stat',
+                        'distance','amplitude_phase','initial_time','initial_fit_stat','f_lower',
                         'optimisation_window_start','optimisation_window_end',
                         'in_previous_window','previous_event_index','polish_evaluations','polish_success'):
-                dtype = bool if key in ('in_previous_window','polish_success') else np.int64 if key in ('initial_template_id','previous_event_index','polish_evaluations') else float
+                dtype = bool if key in ('in_previous_window','polish_success') else np.int64 if key in ('global_event_index','initial_template_id','previous_event_index','polish_evaluations') else float
                 f.create_dataset(key,data=np.asarray([r[key] for r in records], dtype=dtype))
     if args.output_timeseries_file:
         with h5py.File(args.output_timeseries_file,'w') as f:
             f.attrs.update(metadata)
             f.attrs['epoch'],f.attrs['delta_t'] = epoch,dt
             f.attrs['amplitude_model'] = 'positive physical distance; physical coalescence phase'
+            f.attrs['event_fraction'] = args.event_fraction
+            f.attrs['optimisation_signature'] = optimisation_signature
             for c, signal in signals.items():
-                f.create_dataset(c,data=signal)
+                f.create_dataset(c,data=signal,compression='gzip' if parse_fraction(args.event_fraction)[1]>1 else None)
 
 
 if __name__ == '__main__':
