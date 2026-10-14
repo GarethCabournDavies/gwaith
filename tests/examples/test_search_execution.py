@@ -1,66 +1,10 @@
-"""Exercise workflow submission without running a search or requiring Slurm."""
+"""Exercise direct search workflows using stub pipeline commands."""
 import os
 from pathlib import Path
 import subprocess
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
-
-
-def test_slurm_worker_allocates_requested_cpus(tmp_path):
-    mock = tmp_path / 'sbatch'
-    mock.write_text('#!/bin/bash\nprintf "%s\\n" "$@" > "$CAPTURE"\necho 12345\n')
-    mock.chmod(0o755)
-    capture = tmp_path / 'arguments'
-    env = dict(os.environ, PATH=f'{tmp_path}:{os.environ["PATH"]}',
-               RUN_MODE='slurm', N_PROCESSES='6', SLURM_PARTITION='qmcompute', CAPTURE=str(capture))
-    subprocess.run(['bash','-c','source "$1"; run_search_job 6 "$2" hwilas_optimise_snr_peaks --event-fraction 0/4',
-                    'bash',str(ROOT/'examples/search/search_execution.sh'),str(tmp_path/'worker-%j.log')],
-                   env=env,capture_output=True,text=True,check=True)
-    args = capture.read_text().splitlines()
-    assert '--cpus-per-task=6' in args
-    assert '--partition=qmcompute' in args
-    assert '--wait' in args
-    assert any('--wrap=hwilas_optimise_snr_peaks' in arg for arg in args)
-
-
-@pytest.mark.parametrize('mode,workers', [('invalid','4'),('bash','0'),('slurm','x')])
-def test_invalid_execution_settings_fail(mode,workers):
-    env=dict(os.environ,RUN_MODE=mode,N_PROCESSES=workers)
-    result=subprocess.run(['bash','-c','source "$1"','bash',
-                           str(ROOT/'examples/search/search_execution.sh')],env=env,
-                          capture_output=True,text=True)
-    assert result.returncode != 0
-
-
-def test_bash_runs_without_scheduler(tmp_path):
-    env=dict(os.environ,RUN_MODE='bash',N_PROCESSES='3')
-    result=subprocess.run(['bash','-c',
-        'source "$1"; run_search_job 3 "$2/log" echo "$n_processes"',
-        'bash',str(ROOT/'examples/search/search_execution.sh'),str(tmp_path)],
-        env=env,capture_output=True,text=True,check=True)
-    assert result.stdout.strip() == '3'
-
-
-def test_optimisation_submits_all_groups_before_merging(tmp_path):
-    env=dict(os.environ,RUN_MODE='slurm',N_PROCESSES='6',OPTIMISATION_JOBS='3')
-    script = r"""source "$1"
-run_search_job() { printf '%s\n' "$*" > "$CAPTURE/job-${*: -1}"; }
-hwilas_combine_search_parameters() { printf '%s\n' "$*" > "$CAPTURE/parameters"; }
-hwilas_process_data_combine() { printf '%s\n' "$*" > "$CAPTURE/models"; }
-hwilas_optimise_snr_peaks --n-processes 6 --output-parameter-file fit.hdf --output-timeseries-file model.hdf
-"""
-    env['CAPTURE']=str(tmp_path)
-    subprocess.run(['bash','-c',script,'bash',str(ROOT/'examples/search/search_execution.sh')],
-                   env=env,capture_output=True,text=True,check=True)
-    jobs=list(tmp_path.glob('job-*'))
-    assert len(jobs)==3
-    for part in range(3):
-        text=(tmp_path/f'job-model_part_{part}.hdf').read_text()
-        assert f'--event-fraction {part}/3' in text
-        assert '--n-processes 6' in text
-    assert '--same-round' in (tmp_path/'parameters').read_text()
-    assert 'model_part_2.hdf' in (tmp_path/'models').read_text()
 
 
 @pytest.mark.parametrize('dataset,tdi', [('mojito','2'),('sangria','1.5')])
@@ -79,7 +23,7 @@ with pathlib.Path(os.environ['CALL_RECORD']).open('a') as f:
         command.write_text(f'#!{sys.executable}\n'+stub)
         command.chmod(0o755)
     env = dict(os.environ, PATH=f'{tmp_path}:{os.environ["PATH"]}',
-               CALL_RECORD=str(record), RUN_MODE='bash', N_PROCESSES='2',
+               CALL_RECORD=str(record), N_PROCESSES='2', DATA_TIME_ORIGIN='12345678.0', DATA_FILE=str(tmp_path/'data.hdf'),
                OUTPUT_DIR=str(tmp_path/'output'))
     subprocess.run(['bash',str(ROOT/f'examples/search/{dataset}_basic_search.sh')],
                    env=env, capture_output=True, text=True, check=True)

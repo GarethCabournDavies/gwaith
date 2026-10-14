@@ -1,10 +1,8 @@
 #!/bin/bash
 # This script runs a single matched filter task.
-# It is designed to be called by sangria_basic_search.sh either directly (bash mode)
-# or via sbatch (slurm mode).
+# It invokes the matched-filter command directly.
 
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-source "${script_dir}/search_execution.sh"
 
 CHUNK_OUTPUT_DIR="$1"
 CHANNEL="$2"
@@ -31,7 +29,7 @@ else
   exit 1
 fi
 
-run_search_job 1 "${CHUNK_OUTPUT_DIR}/logs/mf_${CHANNEL}_${TASK_ID}-%j.log" hwilas_matched_filter_search \
+hwilas_matched_filter_search \
   --start-time "${11:-0}" \
   --end-time "${12:-31536000}" \
   --verbose \

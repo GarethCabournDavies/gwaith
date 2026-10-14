@@ -8,6 +8,7 @@ import hashlib
 import json
 from pathlib import Path
 from functools import partial
+from functools import lru_cache
 from concurrent.futures import ProcessPoolExecutor
 from multiprocessing import get_context
 import logging
@@ -33,6 +34,7 @@ from hwilas.psd.read import from_txt as psd_from_txt
 # Higher-mode (l, m) array used by the follow-up optimisation to build its
 # higher-mode template.
 DEFAULT_HM_MODE_ARRAY = [(2, 2), (2, 1), (3, 3), (3, 2), (4, 4), (4, 3)]
+DEFAULT_THM_MODE_ARRAY = [(2, 2), (2, -2), (2, 1), (2, -1), (3, 3), (3, -3), (4, 4), (4, -4)]
 from hwilas.types import KeyValueAction
 from hwilas.search.rounds import previous_window_flags
 from hwilas.search.sky_modes import sky_mode_vectors
@@ -48,6 +50,46 @@ PARAMETERS = ('mchirp', 'eta', 'spin1z', 'spin2z', 'eclipticlongitude',
 def _de_objective(position, objective_kwargs):
     """Scalar physical-fit objective, pickleable for spawned DE workers."""
     return -compute_statistic_core(position, **objective_kwargs)
+
+
+class CircularStar(ps.backend.topology.Star):
+    """Global-best PSO with circular angles and reflecting physical bounds."""
+
+    def __init__(self, parameters, lower, upper):
+        super().__init__()
+        periods = {'eclipticlongitude': 2*np.pi, 'polarization': np.pi,
+                   'coa_phase': 2*np.pi}
+        # A restricted angular prior is an interval rather than a full circle.
+        self.circular = np.array([name in periods and np.isclose(
+            upper[i]-lower[i], periods[name], rtol=1e-9, atol=1e-10)
+            for i, name in enumerate(parameters)])
+
+    def displacement(self, target, position, bounds):
+        difference = np.asarray(target)-position
+        width = bounds[1]-bounds[0]
+        difference[..., self.circular] = (
+            difference[..., self.circular]+width[self.circular]/2
+            ) % width[self.circular]-width[self.circular]/2
+        return difference
+
+    def compute_velocity(self, swarm, clamp=None, vh=None, bounds=None):
+        cognitive = self.displacement(swarm.pbest_pos, swarm.position, bounds)
+        social = self.displacement(swarm.best_pos, swarm.position, bounds)
+        velocity = (swarm.options['w']*swarm.velocity +
+            swarm.options['c1']*np.random.uniform(size=swarm.position.shape)*cognitive +
+            swarm.options['c2']*np.random.uniform(size=swarm.position.shape)*social)
+        return vh(velocity, clamp, position=swarm.position, bounds=bounds)
+
+    def compute_position(self, swarm, bounds=None, bh=None):
+        lower, upper = bounds
+        width = upper-lower
+        position = swarm.position+swarm.velocity
+        # Reflect nonperiodic coordinates even when a step crosses several widths.
+        folded = (position-lower) % (2*width)
+        result = lower+np.where(folded <= width, folded, 2*width-folded)
+        result[..., self.circular] = lower[self.circular]+(
+            position[..., self.circular]-lower[self.circular]) % width[self.circular]
+        return result
 
 
 def optimise_population(args, population, lower, upper, kwargs, event_index):
@@ -76,6 +118,10 @@ def optimise_population(args, population, lower, upper, kwargs, event_index):
         np.random.seed(args.seed+event_index)
         optimiser = ps.single.GlobalBestPSO(n_particles=args.n_particles, dimensions=len(lower),
             options={'c1':.5, 'c2':.3, 'w':.9}, bounds=(lower, upper), init_pos=population)
+        parameters = [name for name in PARAMETERS if name != 'tc']
+        optimiser.top = CircularStar(parameters, lower, upper)
+        logger.debug('PSO circular coordinates: %s',
+                     [name for name, circular in zip(parameters, optimiser.top.circular) if circular])
         optimiser.name = f'Event {event_index} PSO'
         if sweep_every:
             original_hook = optimiser.rep.hook
@@ -149,6 +195,17 @@ def _data_frequencyseries(data):
             for c, ts in data.items()}
 
 
+@lru_cache(maxsize=2)
+def _thm_orbit(kind):
+    """Reuse the immutable equatorial orbit interpolation in each worker process."""
+    if kind == 'analytic':
+        from hwilas.waveforms.phenomthm import AnalyticOrbits
+        return AnalyticOrbits()
+    from lisaorbits import OEMOrbits
+    from tdispline.numpy.orbits import OrbitInterpolant
+    return OrbitInterpolant(OEMOrbits.from_included('esa-trailing'), npoints=100000)
+
+
 def build_aligned_waveform(v, data, waveform_params_shared, raise_err=False, waveform_channels=None):
     """Generate the physical short waveform aligned to the event data grid."""
     first = next(iter(data.values()))
@@ -169,16 +226,44 @@ def build_aligned_waveform(v, data, waveform_params_shared, raise_err=False, wav
                         pre_merger_days=1., taper_seconds=3600.,
                         tdi=waveform_params_shared.get('tdi','2'), channels=channels,
                         reference_tc=p['tc']-float(first.epoch))
-        cutoff = lower_frequency_for_duration(p,settings)
-        settings['f_lower'] = cutoff
-        # Translate orbit and time together; every candidate uses the same FFT grid.
-        tm = template(p,float(first.epoch),len(first),settings,modes=DEFAULT_HM_MODE_ARRAY)
+        model = waveform_params_shared.get('waveform_model', 'fastbhb').lower()
+        if model == 'phenomthm':
+            from hwilas.waveforms.phenomthm import get_td_waveform_from_phenomthm
+            from scipy.signal import resample_poly
+            cutoff = float(settings['f_lower'])
+            # Generate only the local support, then restore the fixed event FFT grid.
+            dt = first.delta_t
+            left = max(0, int(np.floor((p['tc']-86400.-float(first.epoch))/dt)))
+            right = min(len(first), int(np.ceil((p['tc']+86400.-float(first.epoch))/dt)))
+            oversampling = int(waveform_params_shared.get('thm_oversampling', 4))
+            origin = float(waveform_params_shared.get('data_time_origin', 0.))
+            raw = get_td_waveform_from_phenomthm('PhenomTHM', tdi=settings['tdi'], **p,
+                start_time=float(first.epoch)+left*dt, delta_t=dt/oversampling,
+                length=(right-left)*oversampling, ifos=channels,
+                f_lower=cutoff, f_ref=float(waveform_params_shared.get('f_ref', cutoff)),
+                orbit=_thm_orbit(waveform_params_shared.get('orbit', 'esa')),
+                data_time_origin=origin, source_oversampling=1,
+                response_nodes=int(waveform_params_shared.get('thm_response_nodes', 16384)),
+                mode_array=DEFAULT_THM_MODE_ARRAY)
+            tm = {c: np.zeros(len(first)) for c in channels}
+            for c in channels:
+                # Anti-alias before returning to the detector cadence.
+                tm[c][left:right] = resample_poly(raw[c].data, 1, oversampling)*settings['laser_frequency']
+        elif model == 'fastbhb':
+            cutoff = lower_frequency_for_duration(p,settings)
+            settings['f_lower'] = cutoff
+            # Translate orbit and time together; every candidate uses the same FFT grid.
+            tm = template(p,float(first.epoch),len(first),settings,modes=DEFAULT_HM_MODE_ARRAY)
+        else:
+            raise ValueError(f'Unknown optimisation waveform model: {model}')
         t = float(first.epoch)+np.arange(len(first))*first.delta_t
         ramp = .5-.5*np.cos(np.pi*np.clip((t-(p['tc']-86400.))/3600.,0,1))
         result = {}
         for c in channels:
             h = first.delta_t*np.fft.rfft(tm[c]*ramp)
             h[:int(cutoff/(1/(len(first)*first.delta_t)))] = 0
+            if model == 'phenomthm':
+                h[np.fft.rfftfreq(len(first), first.delta_t) > settings['f_upper']] = 0
             result[c] = FrequencySeries(h,delta_f=1/(len(first)*first.delta_t),epoch=first.epoch)
         return result
     except (ValueError, RuntimeError, SystemError, FloatingPointError):
@@ -233,9 +318,11 @@ def profile_merger_time(wf, data_fs, psd, channels, n, dt, tc, bounds):
 
 
 def profile_physical_fit(v, data, psd, waveform_params_shared, optimisation_channels,
-                         tc_reference, time_bounds, raise_err=False):
+                         tc_reference, time_bounds, raise_err=False, logarithmic_mass=False):
     """Profile merger time while the swarm searches the physical shape parameters."""
     full = np.insert(v,7,tc_reference) if len(v)==9 else np.asarray(v).copy()
+    if logarithmic_mass:
+        full[0] = 10.**full[0]
     wf = build_aligned_waveform(full,data,waveform_params_shared,raise_err)
     if wf is None:
         return -np.inf,full
@@ -247,10 +334,10 @@ def profile_physical_fit(v, data, psd, waveform_params_shared, optimisation_chan
 
 
 def compute_statistic_core(v, data, psd, waveform_params_shared, optimisation_channels,
-                             raise_err=False, tc_reference=None, time_bounds=None):
+                             raise_err=False, tc_reference=None, time_bounds=None, logarithmic_mass=False):
     if time_bounds is not None:
         return profile_physical_fit(v,data,psd,waveform_params_shared,optimisation_channels,
-                                    tc_reference,time_bounds,raise_err)[0]
+                                    tc_reference,time_bounds,raise_err,logarithmic_mass)[0]
     wf = build_aligned_waveform(v,data,waveform_params_shared,raise_err)
     if wf is None:
         return -np.inf
@@ -410,6 +497,18 @@ def load_arguments():
     parser.add_argument("--psd-files",nargs='+',action=KeyValueAction,
                         help="Channel-specific PSDs as channel:filename pairs")
     parser.add_argument("--f-upper",type=float,default=.09)
+    parser.add_argument('--waveform-model', type=str.lower, choices=['fastbhb', 'phenomthm'],
+                        default='fastbhb', help='Physical follow-up waveform; detection bank is unchanged')
+    parser.add_argument('--mass-coordinate', choices=['log', 'linear'], default='log',
+                        help='Chirp-mass coordinate for swarm sampling and local refinement')
+    parser.add_argument('--orbit', choices=['analytic', 'esa'], default='esa')
+    parser.add_argument('--data-time-origin', type=float,
+                        help='Absolute time of data sample zero; otherwise use stored data_time_origin/t0_raw')
+    parser.add_argument('--f-ref', type=float, help='Fixed THM phase reference frequency; default: f-lower')
+    parser.add_argument('--thm-oversampling', type=int, default=4)
+    parser.add_argument('--thm-response-nodes', type=int, default=16384)
+    parser.add_argument('--harmonic-seed-factors', type=float, nargs='+',
+                        help='Chirp-mass seed multipliers; THM defaults to 1, 1.5, 2 for higher-mode aliases')
     parser.add_argument('--optimizer', '--optimiser', choices=['pso', 'de'], type=str.lower,
                         default='pso', help='Population optimiser; default pso')
     parser.add_argument('--de-strategy', default='best1bin', choices=[
@@ -438,6 +537,14 @@ def load_arguments():
     parser.add_argument("--previous-parameter-file",
                         help="Flag candidates within the saved optimisation windows of this earlier round")
     args = parser.parse_args()
+    if args.f_ref is None:
+        args.f_ref = args.f_lower
+    if args.harmonic_seed_factors is None:
+        args.harmonic_seed_factors = [1., 1.5, 2.] if args.waveform_model == 'phenomthm' else [1.]
+    if not np.isfinite(args.harmonic_seed_factors).all() or min(args.harmonic_seed_factors) <= 0:
+        parser.error('Harmonic seed factors must be finite and positive')
+    if not np.isfinite(args.f_ref) or args.f_ref < args.f_lower or args.thm_oversampling < 1 or args.thm_response_nodes < 2:
+        parser.error('Require f-ref >= f-lower, positive THM oversampling and at least two response nodes')
     try:
         event_partition(0, args.event_fraction)
     except ValueError as error:
@@ -710,30 +817,48 @@ def _optimise_event(task):
         psds[c].data[(frequency<args.f_lower)|(frequency>args.f_upper)] = np.inf
     shared = dict(f_lower=args.f_lower,f_upper=args.f_upper,tdi=args.tdi_generation,
                   distance=initial['distance'],template_scale=scale,data_fs=_data_frequencyseries(data))
+    shared.update(waveform_model=getattr(args, 'waveform_model', 'fastbhb'),
+                  f_ref=getattr(args, 'f_ref', args.f_lower), orbit=getattr(args, 'orbit', 'analytic'),
+                  data_time_origin=getattr(args, 'data_time_origin', 0.),
+                  thm_oversampling=getattr(args, 'thm_oversampling', 4),
+                  thm_response_nodes=getattr(args, 'thm_response_nodes', 16384))
     kwargs = dict(data=data,psd=psds,waveform_params_shared=shared,
                   optimisation_channels=args.fit_channels,
                   tc_reference=seed[7],time_bounds=(lower[7],upper[7]))
-    # A physical phase seed avoids relying on an arbitrary complex rotation.
+    # A (2,2) detection can follow a higher harmonic at a different apparent mass.
     phase_candidates = [seed[9], *np.linspace(lower[9],upper[9],args.phase_seed_count,endpoint=False)]
     initial_fit_stat = -np.inf
-    for phase in phase_candidates:
-        candidate = seed.copy()
-        candidate[9] = phase
-        fit_stat,candidate = profile_physical_fit(candidate,**kwargs,raise_err=True)
-        if fit_stat>initial_fit_stat:
-            initial_fit_stat,seed = fit_stat,candidate
+    bank_seed = seed.copy()
+    seed_harmonic_factor = 1.
+    for factor in getattr(args, 'harmonic_seed_factors', [1.]):
+        chirp_mass = bank_seed[0]*factor
+        if not lower[0] <= chirp_mass <= upper[0]:
+            continue
+        for phase in phase_candidates:
+            candidate = bank_seed.copy()
+            candidate[0], candidate[9] = chirp_mass, phase
+            fit_stat,candidate = profile_physical_fit(candidate,**kwargs,raise_err=True)
+            if fit_stat>initial_fit_stat:
+                initial_fit_stat,seed = fit_stat,candidate
+                seed_harmonic_factor = factor
     if not np.isfinite(initial_fit_stat) or initial_fit_stat<=0:
         raise ValueError('Initial template has no positive physical-fit statistic')
     initial_fit_stat = compute_statistic_core(seed,data,psds,shared,args.fit_channels,raise_err=True)
     kwargs['tc_reference'] = seed[7]
     shape_indices = [i for i,p in enumerate(PARAMETERS) if p!='tc']
     shape_lower,shape_upper = np.asarray(lower)[shape_indices],np.asarray(upper)[shape_indices]
-    shape_seed = seed[shape_indices]
+    shape_seed = seed[shape_indices].copy()
+    logarithmic_mass = getattr(args, "mass_coordinate", "log") == "log"
+    if logarithmic_mass:
+        shape_lower[0], shape_upper[0], shape_seed[0] = np.log10(
+            [shape_lower[0], shape_upper[0], shape_seed[0]])
+    kwargs["logarithmic_mass"] = logarithmic_mass
     population = rng.uniform(shape_lower,shape_upper,(args.n_particles,len(shape_indices)))
     # Keep half the swarm near the bank seed while the rest explores the bounds.
     near = max(1,args.n_particles//2)
     spread = .05*(shape_upper-shape_lower)
-    spread[0] = min(spread[0],.03*shape_seed[0])
+    if not logarithmic_mass:
+        spread[0] = min(spread[0],.03*shape_seed[0])
     population[:near] = np.clip(shape_seed+rng.normal(size=(near,len(shape_indices)))*spread,
                                shape_lower,shape_upper)
     population[0] = shape_seed
@@ -797,13 +922,15 @@ def _optimise_event(task):
     record.update(global_event_index=idx,initial_template_id=template_id,initial_stat=statistic,optimised_stat=fit_stat,
                   distance=fitted_distance,
                   amplitude_phase=0., initial_time=float(time),
+                  seed_harmonic_factor=seed_harmonic_factor,
                   initial_fit_stat=initial_fit_stat,
                   optimisation_window_start=event_epoch,
                   optimisation_window_end=source_epoch+j1*dt,
                   in_previous_window=previous_flag, previous_event_index=previous_index,
                   polish_evaluations=polish_evaluations,polish_success=polish_success)
-    record['f_lower'] = lower_frequency_for_duration(record,
-        dict(f_lower=args.f_lower, f_upper=args.f_upper, pre_merger_days=1.))
+    record['f_lower'] = (args.f_lower if shared['waveform_model'] == 'phenomthm' else
+        lower_frequency_for_duration(record,
+        dict(f_lower=args.f_lower, f_upper=args.f_upper, pre_merger_days=1.)))
     logger.info(
         'Event %d / %d after optimisation: time=%.3f s (%.6f days), '
         'optimised statistic=%.3f, chirp mass=%.6g Msun, chi_eff=%.6f',
@@ -838,6 +965,12 @@ def main():
             metadata = dict(f.attrs)
             starts.append(float(f.attrs['epoch']))
             ends.append(starts[-1]+len(f[args.optimisation_channels[0]])*dt)
+    if getattr(args, 'data_time_origin', None) is None:
+        args.data_time_origin = metadata.get('data_time_origin', metadata.get('t0_raw'))
+    if getattr(args, 'waveform_model', 'fastbhb') == 'phenomthm' and args.data_time_origin is None:
+        if getattr(args, 'orbit', 'esa') == 'esa':
+            raise ValueError('THM ESA fits require --data-time-origin or stored data_time_origin/t0_raw metadata')
+        args.data_time_origin = 0.
     optimisation_signature = signature.hexdigest()
     epoch, end = min(starts), max(ends)
     signals = {c:np.zeros(round((end-epoch)/dt)) for c in args.output_timeseries_channels}
@@ -888,6 +1021,18 @@ def main():
                            de_recombination=args.de_recombination,
                            de_tol=args.de_tol, de_atol=args.de_atol,
                            amplitude_model='positive physical distance; physical coalescence phase')
+            model = getattr(args, 'waveform_model', 'fastbhb')
+            f.attrs.update(waveform_model=model,
+                           approximant='IMRPhenomTHM' if model == 'phenomthm' else 'IMRPhenomHM',
+                           mode_array=DEFAULT_THM_MODE_ARRAY if model == 'phenomthm' else DEFAULT_HM_MODE_ARRAY,
+                           f_ref=getattr(args, 'f_ref', args.f_lower),
+                           orbit=getattr(args, 'orbit', 'analytic') if model == 'phenomthm' else 'analytic',
+                           data_time_origin=float(args.data_time_origin or 0.),
+                           thm_oversampling=getattr(args, 'thm_oversampling', 4),
+                           thm_response_nodes=getattr(args, 'thm_response_nodes', 16384))
+            f.attrs['mass_coordinate'] = getattr(args, 'mass_coordinate', 'log')
+            f.attrs['harmonic_seed_factors'] = getattr(args, 'harmonic_seed_factors', [1.])
+            f.create_dataset('seed_harmonic_factor', data=np.asarray([r.get('seed_harmonic_factor', 1.) for r in records]))
             if args.previous_parameter_file:
                 f.attrs['previous_parameter_file'] = args.previous_parameter_file
             for key in (*PARAMETERS,'mass1','mass2','global_event_index','initial_template_id','initial_stat','optimised_stat',

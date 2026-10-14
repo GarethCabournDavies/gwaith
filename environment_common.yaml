@@ -18,7 +18,6 @@ dependencies:
  - ghp-import
  - wget
  - pip:
-   - git+https://github.com/titodalcanton/BBHx.git@py39-and-cleanup
    - git+ssh://git@github.com/uk-lisa-gs/gwaith.git
    - lisa-data-challenge
    - lisabeta

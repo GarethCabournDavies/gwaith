@@ -54,7 +54,7 @@ def test_de_real_solver_serial_and_parallel_agree(monkeypatch):
 
 def test_pso_dispatch_preserves_settings(monkeypatch):
     args = SimpleNamespace(optimizer='pso', seed=42, n_particles=5, n_iterations=3, n_processes=2)
-    population = np.zeros((5, 2)); lower = np.full(2, -1.); upper = -lower
+    population = np.zeros((5, 9)); lower = np.full(9, -1.); upper = -lower
     class Swarm:
         def __init__(self, **kwargs):
             assert kwargs['n_particles'] == 5
@@ -62,6 +62,6 @@ def test_pso_dispatch_preserves_settings(monkeypatch):
         def optimize(self, objective, **kwargs):
             assert objective is module.compute_minus_statistic
             assert kwargs['iters'] == 3 and kwargs['n_processes'] == 2
-            return -10., np.zeros(2)
+            return -10., np.zeros(9)
     monkeypatch.setattr(module.ps.single, 'GlobalBestPSO', Swarm)
     assert module.optimise_population(args, population, lower, upper, {}, 0)[0] == -10.

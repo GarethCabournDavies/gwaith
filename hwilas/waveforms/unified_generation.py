@@ -4,13 +4,12 @@ Unified waveform generation interface for GW search and analysis.
 Provides a single coherent function for generating waveforms using the LDC
 FastBHB (lisabeta) time-domain generator, with automatic frame conversion
 (XYZ -> AET when needed), optional channel filtering, and consistent parameter
-handling. The legacy BBHx and PhenomXPy generators have been removed from the
-project; FastBHB is the only supported path.
+handling. PhenomTHM uses PhenomXPy modes and a TDISpline detector response.
 """
 
 import numpy as np
 
-from hwilas.waveforms import get_fd_waveform, AET_CHANNELS, FASTBHB_CHANNELS
+from hwilas.waveforms import get_fd_waveform, AET_CHANNELS
 from hwilas.waveforms.constants import TIME_OFFSET_20_DEGREES
 from hwilas.data_processing.tdi import linear_AET_conversion
 
@@ -31,9 +30,7 @@ def generate_waveform(
     """
     Generate a waveform with the unified interface.
 
-    The only supported generator is LDC FastBHB (lisabeta), which works in the
-    time domain: provide ``detector_times`` (or both ``delta_t`` and
-    ``delta_f``). Output frame conversion is automatic (XYZ ↔ AET).
+    All models return time-domain detector strain on ``detector_times``. Output frame conversion is automatic (XYZ ↔ AET).
 
     Parameters
     ----------
@@ -48,13 +45,11 @@ def generate_waveform(
         - tc (required, coalescence time in seconds)
         - spin1_polar_angle, spin2_polar_angle (optional, in rad; default 0.0)
     approximant : str
-        Waveform approximant. Only 'FastBHB' (LDC FastBHB, lisabeta-backed,
-        time-domain) is supported.
+        'FastBHB', 'PhenomTHM' (PhenomXPy + TDISpline), or an external provider name.
     detector_times : array_like, optional
         Time grid for output (required for time-domain generators).
-        For frequency-domain, provide either this or both delta_t and delta_f.
     delta_f : float, optional
-        Frequency resolution (Hz). Required for frequency-domain generators.
+        Accepted for API compatibility; detector_times sets the output grid.
     delta_t : float, optional
         Time sampling interval (seconds). Inferred from detector_times if not given.
     channels : list of str, optional
@@ -62,13 +57,13 @@ def generate_waveform(
         Valid: LISA_A, LISA_E, LISA_T (AET) or LISA_X, LISA_Y, LISA_Z (XYZ).
     tdi_generation : str, default '1.5'
         TDI generation version ('1.5' or '2.0').
-    orbit : str, default 'analytic'
-        Orbit source ('analytic' or 'oem'). Ignored by the FastBHB generator.
+    orbit : str or object, default 'analytic'
+        PhenomTHM orbit ('analytic', 'oem', or an equatorial orbit object).
+        External providers receive this value as their orbit parameter.
     t_offset : float, default TIME_OFFSET_20_DEGREES
-        Time offset for SSB frame conversion (seconds).
+        Accepted for API compatibility; model parameters use the SSB frame.
     padding_fill : float, default 0.0
-        Value to use for padding outside the generated window (if detector_times
-        is provided for a frequency-domain generator).
+        Accepted for API compatibility.
 
     Returns
     -------
@@ -83,11 +78,6 @@ def generate_waveform(
         If approximant is unknown, required parameters are missing, or channel
         specifications are incompatible with the chosen approximant.
     """
-    if str(approximant).lower() != 'fastbhb':
-        raise ValueError(
-            f"Unknown approximant '{approximant}'. Only 'FastBHB' is supported."
-        )
-
     # Extract parameters and apply defaults
     mass1 = float(signal['mass1'])
     mass2 = float(signal['mass2'])
@@ -102,7 +92,7 @@ def generate_waveform(
     eclipticlatitude = float(signal['eclipticlatitude'])
     inclination = float(signal['inclination'])
     polarization = float(signal['polarization'])
-    phi_ref = float(signal['phi_ref'])
+    phi_ref = float(signal.get('phi_ref', signal.get('coa_phase', 0.)))
     coa = signal.get('coa_phase')
     coa_phase = float(coa) if coa is not None else phi_ref
     tc = float(signal['tc'])
@@ -126,9 +116,16 @@ def generate_waveform(
         tdi=tdi_generation,
     )
 
-    # FastBHB time-domain generator
+    # Keep model-specific settings such as f_ref, modes and orbit epochs.
+    common_params.update({key: value for key, value in signal.items() if key not in common_params})
+    common_params['tdi'] = tdi_generation
+    for key in ('start_time', 'end_time', 'length', 'delta_t', 'delta_f', 'ifos'):
+        common_params.pop(key, None)
+    if str(approximant).lower() != 'fastbhb':
+        common_params['orbit'] = orbit
+
     if detector_times is None:
-        raise ValueError("Approximant 'FastBHB' requires a 'detector_times' grid")
+        raise ValueError(f"Approximant {approximant!r} requires a detector_times grid")
 
     detector_times = np.asarray(detector_times, dtype=float).ravel()
     if len(detector_times) < 2:
@@ -137,10 +134,13 @@ def generate_waveform(
     if delta_t is None:
         delta_t = float(detector_times[1] - detector_times[0])
 
+    if delta_t <= 0 or not np.allclose(np.diff(detector_times), delta_t):
+        raise ValueError('detector_times must be uniformly sampled with positive delta_t')
+
     generated = get_fd_waveform(
-        'FastBHB',
+        approximant,
         start_time=float(detector_times[0]),
-        end_time=float(detector_times[-1]),
+        end_time=float(detector_times[-1])+delta_t,
         delta_t=delta_t,
         **common_params,
     )
@@ -162,10 +162,16 @@ def generate_waveform(
             "Expected either AET or XYZ channels."
         )
 
+    if channels is not None and any(ch in ('LISA_X', 'LISA_Y', 'LISA_Z') for ch in channels):
+        A, E, T = (data[ch] for ch in AET_CHANNELS)
+        data.update(LISA_X=T/np.sqrt(3)-A/np.sqrt(2)+E/np.sqrt(6),
+                    LISA_Y=T/np.sqrt(3)-2*E/np.sqrt(6),
+                    LISA_Z=T/np.sqrt(3)+A/np.sqrt(2)+E/np.sqrt(6))
+
     # Filter channels if requested
     if channels is not None:
-        channels_set = set(ch for ch in channels if ch in data)
-        if not channels_set:
+        channels_set = tuple(channels)
+        if not channels_set or any(ch not in data for ch in channels_set):
             raise ValueError(
                 f"No requested channels found in generated data. "
                 f"Requested: {channels}, Generated: {list(data.keys())}"

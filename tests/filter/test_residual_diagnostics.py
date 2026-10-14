@@ -81,3 +81,39 @@ def test_raw_slice_call_infers_shared_origin_from_siblings(tmp_path):
     explicit=read_window(source,['LISA_A'],400.,64,4.,2.816e14,
                          raw_time_reference=origin)['LISA_A']
     np.testing.assert_array_equal(inferred,explicit)
+
+
+def test_raw_catalogue_matches_processed_parameters(tmp_path):
+    from hwilas.search.residual_diagnostics import load_catalogue
+    raw = tmp_path/'raw.hdf'
+    fields = dict(TimeCoalescencePhenomTPHMSSBFrame=[1800., 900.],
+                  PrimaryMassSourceFrame=[10., 20.], SecondaryMassSourceFrame=[5., 10.],
+                  PrimaryMassSSBFrame=[30., 60.], SecondaryMassSSBFrame=[15., 30.],
+                  LuminosityDistance=[2., 3.], RightAscension=[0., 0.], Declination=[0., 0.],
+                  InclinationAngle=[.4, .5], PolarisationAngle=[.2, .3], ID=[7., 8.],
+                  PrimarySpinCompZ=[.1, .2], SecondarySpinCompZ=[-.1, -.2],
+                  PhaseReferenceSourceFrame=[.6, .7], EstimatedSNR=[100., 200.])
+    with h5py.File(raw, 'w') as f:
+        group = f.create_group('Binaries')
+        for key, values in fields.items():
+            group[key] = values
+        group['LuminosityDistance'].attrs['unit'] = 'Gpc'
+    rows = load_catalogue(raw)
+    assert [r['source_id'] for r in rows] == [8, 7]
+    assert rows[0]['tc'] == 100.
+    assert rows[0]['catalogue_tc'] == 900.
+    assert rows[0]['mass1'] == 60. and rows[0]['mass2'] == 30.
+    assert rows[0]['distance'] == 3000.
+    assert rows[0]['inclination'] == .5 and rows[0]['polarization'] == .3
+    assert rows[0]['coa_phase'] == .7 and rows[0]['spin2z'] == -.2
+    assert rows[0]['eclipticlongitude'] == pytest.approx(0.)
+    assert rows[0]['eclipticlatitude'] == pytest.approx(0.)
+    processed = tmp_path/'processed.hdf'
+    mapping = dict(ID='source_id', tc='catalogue_tc', PrimarySpinCompZ='spin1z',
+                   SecondarySpinCompZ='spin2z', PhaseReferenceSourceFrame='coa_phase',
+                   EstimatedSNR='expected_snr')
+    with h5py.File(processed, 'w') as f:
+        for key in ['mass1', 'mass2', 'distance', 'eclipticlongitude', 'eclipticlatitude',
+                    'inclination', 'polarization', *mapping]:
+            f[key] = [row[mapping.get(key, key)] for row in rows]
+    assert load_catalogue(processed) == rows

@@ -1,14 +1,8 @@
-"""
-Waveform generation wrapper providing a unified interface for time-domain
-waveforms, routing to the LDC FastBHB (lisabeta) generator. The legacy BBHx and
-PhenomXPy generators have been removed from the project; FastBHB is the only
-supported path.
-"""
+"""Dispatch detector waveform models through a common TimeSeries interface."""
 
 FASTBHB_CHANNELS = ('LISA_A', 'LISA_E', 'LISA_T')
 from .constants import AET_CHANNELS, LISA_CHANNELS
-import numpy as np
-from gwaith.types import FrequencySeries
+from .plugins import available_approximants, get_external_generator
 
 
 # Approximant name(s) routed to the time-domain FastBHB (lisabeta) generator.
@@ -26,16 +20,14 @@ def get_fd_waveform(
     Generate a detector waveform as a dictionary of ``gwaith.types.TimeSeries``
     objects.
 
-    The LDC FastBHB (lisabeta) time-domain generator is the only supported
-    path. The waveform is returned in the time domain so that it can be
+    Built-in and external providers return time-domain strain so it can be
     (over)whitened before matched filtering; callers convert back to the
     frequency domain as needed.
 
     Parameters
     ----------
     approximant : str
-        Name of the approximant. Only ``'FastBHB'`` (case-insensitive) is
-        recognised.
+        ``'FastBHB'``, ``'PhenomTHM'``, or an installed provider name (case-insensitive).
     tdi : {'1.5', '2'}, optional
         TDI version for the LISA detector channels. Default is ``'2'``.
     **waveform_params : dict
@@ -71,4 +63,13 @@ def get_fd_waveform(
             **waveform_params
         )
 
-    raise ValueError(f"Approximant {approximant} not recognised")
+    if approximant.lower() in {'phenomthm', 'imrphenomthm', 'phenomthm+tdispline'}:
+        from .phenomthm import get_td_waveform_from_phenomthm
+        if 'delta_t' not in waveform_params:
+            waveform_params['delta_t'] = 1.0 / (waveform_params['delta_f'] * waveform_params['length'])
+        return get_td_waveform_from_phenomthm(approximant, tdi=tdi, **waveform_params)
+
+    generator = get_external_generator(approximant)
+    if 'delta_t' not in waveform_params:
+        waveform_params['delta_t'] = 1.0 / (waveform_params['delta_f'] * waveform_params['length'])
+    return generator(approximant=approximant, tdi=tdi, **waveform_params)

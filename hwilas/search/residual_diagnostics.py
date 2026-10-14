@@ -25,17 +25,34 @@ def load_parameters(path):
 
 
 def load_catalogue(path,time_offset=800.):
-    """Read standard truth columns, keeping source IDs and catalogue conventions."""
+    """Read processed truth columns or a raw Mojito Binaries catalogue."""
     with h5py.File(path,'r') as f:
+        if 'Binaries' in f:
+            from hwilas.data_processing.truth import load_truth_mojito, standardize_truth_catalog
+            # Normalisation retains SSB masses, converts distance to Mpc and RA/Dec to ecliptic angles.
+            catalog = standardize_truth_catalog(load_truth_mojito(path).catalog)
+            columns = {key: catalog[key] for key in catalog.dtype.names}
+        else:
+            columns = {key: f[key][:] for key in f
+                       if isinstance(f[key], h5py.Dataset) and f[key].ndim == 1}
+        required = ['tc', 'mass1', 'mass2', 'distance', 'eclipticlongitude',
+                    'eclipticlatitude', 'inclination', 'polarization', 'ID',
+                    'PrimarySpinCompZ', 'SecondarySpinCompZ',
+                    'PhaseReferenceSourceFrame', 'EstimatedSNR']
+        missing = [key for key in required if key not in columns]
+        if missing:
+            raise ValueError(f'Catalogue {path} is missing parameters: {", ".join(missing)}')
+        if any(len(columns[key]) != len(columns['tc']) for key in required):
+            raise ValueError(f'Catalogue {path} has inconsistent parameter lengths')
         rows=[]
-        for i in range(len(f['tc'])):
-            row={key:float(f[key][i]) for key in ['mass1','mass2','distance',
+        for i in range(len(columns['tc'])):
+            row={key:float(columns[key][i]) for key in ['mass1','mass2','distance',
                  'eclipticlongitude','eclipticlatitude','inclination','polarization']}
-            row.update(source_id=int(f['ID'][i]),tc=float(f['tc'][i])-time_offset,
-                       catalogue_tc=float(f['tc'][i]),spin1z=float(f['PrimarySpinCompZ'][i]),
-                       spin2z=float(f['SecondarySpinCompZ'][i]),
-                       coa_phase=float(f['PhaseReferenceSourceFrame'][i]),
-                       expected_snr=float(f['EstimatedSNR'][i]))
+            row.update(source_id=int(columns['ID'][i]),tc=float(columns['tc'][i])-time_offset,
+                       catalogue_tc=float(columns['tc'][i]),spin1z=float(columns['PrimarySpinCompZ'][i]),
+                       spin2z=float(columns['SecondarySpinCompZ'][i]),
+                       coa_phase=float(columns['PhaseReferenceSourceFrame'][i]),
+                       expected_snr=float(columns['EstimatedSNR'][i]))
             row['mchirp'],row['eta']=mchirp_eta_from_mass1_mass2(row['mass1'],row['mass2'])
             rows.append(row)
     return sorted(rows,key=lambda row:row['tc'])
@@ -142,15 +159,18 @@ def read_window(path,channels,epoch,n,dt,laser_frequency,fractional_default=True
 
 def waveform_window(params,metadata,channels,epoch,n,dt,laser_scale=1.):
     """Regenerate a physical model on its saved FFT grid, then crop to the plot grid."""
-    from tools.search.optimise_snr_peaks import build_aligned_waveform, PARAMETERS, DEFAULT_HM_MODE_ARRAY
+    from tools.search.optimise_snr_peaks import build_aligned_waveform, PARAMETERS, DEFAULT_HM_MODE_ARRAY, DEFAULT_THM_MODE_ARRAY
     pre_days=float(metadata.get('pre_merger_days',1.))
     if pre_days!=1. or float(metadata.get('taper_seconds',3600.))!=3600.:
         raise ValueError('The current optimiser generator requires one-day support and a one-hour taper')
-    modes=np.asarray(metadata.get('mode_array',DEFAULT_HM_MODE_ARRAY))
-    if not np.array_equal(modes,np.asarray(DEFAULT_HM_MODE_ARRAY)):
+    approximant = metadata.get('approximant', 'IMRPhenomHM')
+    if approximant not in ('IMRPhenomHM', 'IMRPhenomTHM'):
+        raise ValueError('Unsupported saved optimisation approximant')
+    model = metadata.get('waveform_model', 'phenomthm' if approximant == 'IMRPhenomTHM' else 'fastbhb')
+    expected_modes = DEFAULT_THM_MODE_ARRAY if model == 'phenomthm' else DEFAULT_HM_MODE_ARRAY
+    modes=np.asarray(metadata.get('mode_array',expected_modes))
+    if not np.array_equal(modes,np.asarray(expected_modes)):
         raise ValueError('Saved mode array differs from the current optimiser generator')
-    if metadata.get('approximant','IMRPhenomHM')!='IMRPhenomHM':
-        raise ValueError('This notebook generator currently reproduces IMRPhenomHM fits')
     if not np.isclose(float(params.get('amplitude_phase',0.)),0.):
         raise ValueError('Regenerate the legacy complex-amplitude fit with the physical-distance optimiser')
     start=float(params.get('optimisation_window_start',np.floor((params['tc']-2*86400)/dt)*dt))
@@ -163,6 +183,11 @@ def waveform_window(params,metadata,channels,epoch,n,dt,laser_scale=1.):
     shared=dict(f_lower=float(metadata.get('f_lower_floor',3e-5)),
                 f_upper=float(metadata.get('f_upper',.09)),tdi=str(metadata.get('tdi_generation','2')),
                 distance=params['distance'],template_scale=laser_scale)
+    shared.update(waveform_model=model, f_ref=float(metadata.get('f_ref', shared['f_lower'])),
+                  orbit=str(metadata.get('orbit', 'esa')),
+                  data_time_origin=float(metadata.get('data_time_origin', 0.)),
+                  thm_oversampling=int(metadata.get('thm_oversampling', 4)),
+                  thm_response_nodes=int(metadata.get('thm_response_nodes', 16384)))
     vector=np.array([params[k] for k in PARAMETERS])
     fd=build_aligned_waveform(vector,dummy,shared,True,waveform_channels=channels)
     positions=np.rint((epoch+np.arange(n)*dt-start)/dt).astype(int)

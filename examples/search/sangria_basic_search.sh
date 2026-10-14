@@ -13,7 +13,7 @@ psd_file_t="${psd_dir}/T_sangria_UNSMOOTHED_PSD.txt"
 psd_fit_t="${psd_dir}/T_sangria_SMOOTHED_PSD.txt"
 tdi_generation=1.5
 truth_file="${OUTPUT_DIR}/sangria_truth.hdf"
-n_processes=4
+n_processes="${N_PROCESSES:-4}"
 
 mkdir -p "$(dirname "$data_file")"
 hwilas_process_sangria_data --data-file "$truth_source" --output-file "$data_file" --channels LISA_A LISA_E LISA_T --verbose
@@ -160,7 +160,7 @@ pids=()
 trigger_files=()
 for ((part=0; part<template_parallelization; part++)); do
     trigger_files+=("${round1_search_dir}/matched_filter_AE_${part}.hdf")
-    run_search_job 1 "${round1_search_dir}/matched_filter_${part}-%j.log" hwilas_matched_filter_search \
+    hwilas_matched_filter_search \
         --input-data-file "${subtract_dir}/data_subtracted.hdf" \
         --bank-file "$bank_file" \
         --channels LISA_A LISA_E \
@@ -305,7 +305,7 @@ pids=()
 trigger_files=()
 for ((part=0; part<template_parallelization; part++)); do
     trigger_files+=("${residual_search_dir}/matched_filter_AE_${part}.hdf")
-    run_search_job 1 "${residual_search_dir}/matched_filter_${part}-%j.log" hwilas_matched_filter_search \
+    hwilas_matched_filter_search \
         --input-data-file "$final_residual_file" \
         --bank-file "$bank_file" \
         --channels LISA_A LISA_E \

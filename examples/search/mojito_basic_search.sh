@@ -12,14 +12,21 @@ psd_file_e="${psd_dir}/E_mojito_SMOOTHED_PSD.txt"
 psd_file_t="${psd_dir}/T_mojito_UNSMOOTHED_PSD.txt"
 psd_fit_t="${psd_dir}/T_mojito_SMOOTHED_PSD.txt"
 tdi_generation=2
+optimisation_model="${OPTIMISATION_MODEL:-phenomthm}"
+optimisation_orbit="${OPTIMISATION_ORBIT:-esa}"
+# Phase is fitted at a fixed reference frequency, independent of the bank phase.
+optimisation_f_ref="${OPTIMISATION_F_REF:-0.00003}"
+# Absolute timestamp of the first input sample, supplied with the dataset.
+data_time_origin="${DATA_TIME_ORIGIN:?Set DATA_TIME_ORIGIN to the absolute timestamp of the first input sample}"
 truth_file="${OUTPUT_DIR}/mojito_truth.hdf"
-source "${script_dir}/search_execution.sh"
+n_processes="${N_PROCESSES:-4}"
 
 mkdir -p "$OUTPUT_DIR"
 hwilas_extract_truth --data-file "$truth_source" --type mojito --no-timeseries --output-file "$truth_file" --verbose
 search_dir="${OUTPUT_DIR}/round_0/matched_filter"
 template_parallelization=$n_processes
 network_statistic_threshold=${NETWORK_STATISTIC_THRESHOLD:-6}
+
 # Plot original data before the first search round.
 hwilas_plot_processed_data \
     --data-file "$data_file" \
@@ -31,8 +38,7 @@ hwilas_plot_processed_data \
     --psd-files LISA_A:"$psd_file_a" LISA_E:"$psd_file_e" LISA_T:"$psd_file_t" \
     --verbose
 
-# # Combine A/E at every matched-filter sample; cluster network peaks across the bank.
-
+# Combine A/E at every matched-filter sample; cluster network peaks across the bank.
 candidate_dir="${OUTPUT_DIR}/round_0/candidates"
 mkdir -p "$search_dir" "$candidate_dir"
 status=0
@@ -40,7 +46,7 @@ pids=()
 trigger_files=()
 for ((part=0; part<template_parallelization; part++)); do
     trigger_files+=("${search_dir}/matched_filter_AE_${part}.hdf")
-    run_search_job 1 "${search_dir}/matched_filter_${part}-%j.log" hwilas_matched_filter_search \
+    hwilas_matched_filter_search \
         --input-data-file "$data_file" \
         --bank-file "$bank_file" \
         --channels LISA_A LISA_E \
@@ -91,6 +97,9 @@ subtract_dir="${OUTPUT_DIR}/round_0/subtract"
 mkdir -p "$optimise_dir" "$subtract_dir"
 
 hwilas_optimise_snr_peaks \
+    --waveform-model "$optimisation_model" \
+    --orbit "$optimisation_orbit" --data-time-origin "$data_time_origin" \
+    --f-ref "$optimisation_f_ref" --mass-coordinate log \
     --input-file "${candidate_dir}/candidates.hdf" \
     --bank-file "$bank_file" \
     --data-files "$data_file" \
@@ -157,7 +166,7 @@ pids=()
 trigger_files=()
 for ((part=0; part<template_parallelization; part++)); do
     trigger_files+=("${round1_search_dir}/matched_filter_AE_${part}.hdf")
-    run_search_job 1 "${round1_search_dir}/matched_filter_${part}-%j.log" hwilas_matched_filter_search \
+    hwilas_matched_filter_search \
         --input-data-file "${subtract_dir}/data_subtracted.hdf" \
         --bank-file "$bank_file" \
         --channels LISA_A LISA_E \
@@ -217,6 +226,9 @@ round1_optimise_dir="${OUTPUT_DIR}/round_1/optimise"
 mkdir -p "$round1_optimise_dir"
 
 hwilas_optimise_snr_peaks \
+    --waveform-model "$optimisation_model" \
+    --orbit "$optimisation_orbit" --data-time-origin "$data_time_origin" \
+    --f-ref "$optimisation_f_ref" --mass-coordinate log \
     --input-file "${round1_candidate_dir}/candidates.hdf" \
     --bank-file "$bank_file" \
     --data-files "${subtract_dir}/data_subtracted.hdf" \
@@ -302,7 +314,7 @@ pids=()
 trigger_files=()
 for ((part=0; part<template_parallelization; part++)); do
     trigger_files+=("${residual_search_dir}/matched_filter_AE_${part}.hdf")
-    run_search_job 1 "${residual_search_dir}/matched_filter_${part}-%j.log" hwilas_matched_filter_search \
+    hwilas_matched_filter_search \
         --input-data-file "$final_residual_file" \
         --bank-file "$bank_file" \
         --channels LISA_A LISA_E \

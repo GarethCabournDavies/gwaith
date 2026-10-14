@@ -19,6 +19,7 @@ dependencies = [
     "mojito-processor @ git+https://github.com/OllieBurke/MojitoProcessor.git",
 	"gwreparam @ git+ssh://git@github.com/uk-lisa-gs/gwreparam.git",
     "tdispline @ git+ssh://git@github.com/uk-lisa-gs/tdi-spline.git",
+    "phenomxpy==2.0.3",
     "lisaorbits",
     "lisa-data-challenge",
     "lisabeta",
