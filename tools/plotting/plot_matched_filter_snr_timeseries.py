@@ -15,6 +15,8 @@ Example::
         --template-ids 0 1 2
 """
 
+from hwilas.waveforms.cli import add_waveform_arguments
+from hwilas.waveforms.plugins import prepare_generator, reference_frequency
 import argparse
 import logging
 import os
@@ -112,12 +114,7 @@ def load_arguments():
         default=7200.0,
         help="Cluster window in seconds for peak detection"
     )
-    parser.add_argument(
-        "--waveform-type",
-        choices=['fastbhb'],
-        default='fastbhb',
-        help="Waveform generator to use (default: fastbhb)"
-    )
+    add_waveform_arguments(parser)
     parser.add_argument(
         "--tdi-generation",
         choices=['1.5', '2'],
@@ -136,6 +133,7 @@ def main():
     os.makedirs(args.output_directory, exist_ok=True)
 
     with h5py.File(args.input_data_file, 'r') as data_file:
+        metadata = dict(data_file.attrs)
         data_epoch = float(data_file.attrs['epoch'])
         delta_t = float(data_file.attrs['delta_t'])
         data_array = data_file[args.channel][:]
@@ -173,7 +171,11 @@ def main():
     delta_f = 1.0 / tlen
     flen = len(data) // 2 + 1
 
-    approximant = 'FastBHB'
+    approximant = args.waveform_type
+    if args.data_time_origin is None:
+        args.data_time_origin = metadata.get('data_time_origin',metadata.get('t0_raw'))
+    keywords = prepare_generator(approximant, orbit=args.orbit, data_time_origin=args.data_time_origin,
+        start_time=data_start_time,end_time=data_end_time,keywords=args.generator_keywords)
     # The FastBHB time-domain generator returns a *time-series* of ``length``
     # samples, so its frequency resolution is 1 / (length * delta_t), which must
     # equal the data's delta_f. Hence length is the number of time samples
@@ -196,6 +198,9 @@ def main():
         'delta_t': delta_t,
     }
 
+    waveform_params_shared.update(keywords)
+    waveform_params_shared.update(orbit=args.orbit,data_time_origin=args.data_time_origin,
+        f_ref=reference_frequency(approximant,args.f_lower,args.f_ref))
     logger.info("Loading PSD")
     psd_raw = psd_from_txt(args.psd_file, flen, delta_f, delta_f, is_asd_file=False)
     psd = FrequencySeries(psd_raw.data, delta_f=delta_f)

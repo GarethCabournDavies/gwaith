@@ -21,7 +21,9 @@ from hwilas.types import KeyValueAction
 from hwilas.filter import matched_filter_frequencyseries
 from hwilas.psd.read import from_txt as psd_from_txt
 from hwilas.template_banks.helpers import waveform_from_bank
-from hwilas.waveforms.short_fastbhb import short_template, template_geometry
+from hwilas.waveforms.short_templates import short_template, template_geometry
+from hwilas.waveforms.cli import add_waveform_arguments
+from hwilas.waveforms.plugins import prepare_generator
 from hwilas.template_banks.frequency import duration_from_frequency
 
 logger = logging.getLogger(__name__)
@@ -103,14 +105,7 @@ def main():
         help="Which generation of TDI to use when generating the waveform"
     )
 
-    parser.add_argument(
-        '--waveform-type',
-        choices=['fastbhb'],
-        default='fastbhb',
-        help="Waveform generator to use for the template bank. 'fastbhb' uses the "
-             "LDC FastBHB (lisabeta) time-domain generator, which returns AET channels "
-             "(LISA_A/LISA_E/LISA_T). The TDI generation is set via --tdi-generation."
-    )
+    add_waveform_arguments(parser)
 
     parser.add_argument("--template-fraction-range", default="0/1",
                         help="Optional, analyze only part of template bank. Format"
@@ -157,6 +152,7 @@ def main():
     # First, load in the data. Get from the file the information on when it starts, its length and its delta t
     # The input is a sangria dataset read directly from an HDF5 file.
     with h5py.File(args.input_data_file, 'r') as data_file:
+        metadata = dict(data_file.attrs)
         fractional_frequency = bool(data_file.attrs.get("divide_by_laser_frequency", False))
         laser_frequency = float(data_file.attrs.get("laser_frequency", 2.816e14))
         data_epoch = data_file.attrs['epoch']
@@ -177,6 +173,11 @@ def main():
     data_start_time = float(data.epoch)
     data_end_time = data_start_time + tlen
 
+    if args.data_time_origin is None:
+        args.data_time_origin = metadata.get('data_time_origin', metadata.get('t0_raw'))
+    args.generator_keywords = prepare_generator(args.waveform_type, orbit=args.orbit,
+        data_time_origin=args.data_time_origin, start_time=data_start_time, end_time=data_end_time,
+        keywords=args.generator_keywords)
     logger.info(f'Data from {data_start_time:.0f} to {data_end_time:.0f} (including padding)')
     logger.debug("Original data length: %d", original_dlen)
     if (args.start_time is None) != (args.end_time is None):
@@ -304,6 +305,8 @@ def main():
                 raise ValueError(f"Invalid bank f_lower for template {template_idx}: {f_lower}")
             logger.debug("Template %d lower frequency: %g Hz", template_idx, f_lower)
             settings = dict(delta_t=delta_t, initial_position_deg=-140.,
+                            approximant=args.waveform_type, orbit=args.orbit, f_ref=args.f_ref,
+                            data_time_origin=args.data_time_origin, generator_keywords=args.generator_keywords,
                             f_lower=f_lower, f_upper=args.f_upper, tdi=args.tdi_generation,
                             laser_frequency=1. if fractional_frequency else laser_frequency,
                             pre_merger_seconds=durations[template_idx]+3600.,
@@ -445,6 +448,9 @@ def main():
 
     logger.info("Outputting to file")
     with h5py.File(args.output_file, 'w') as output_trigger_file:
+        import json
+        output_trigger_file.attrs.update(approximant=args.waveform_type, orbit=args.orbit,
+            generator_keywords=json.dumps(args.generator_keywords))
         output_trigger_file.attrs['statistic'] = 'same-time A/E quadrature SNR' if len(channels)>1 else 'single-channel SNR'
         output_trigger_file.attrs['channels'] = channels
         output_trigger_file.attrs['analysis_intervals'] = [[valid_start_time, valid_end_time]]

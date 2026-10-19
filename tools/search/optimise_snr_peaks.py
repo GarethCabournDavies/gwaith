@@ -2,6 +2,10 @@
 Optimise the physical-fit statistic for selected search candidates.
 """
 
+import os
+# Set before numerical imports initialise the OpenMP runtime or spawn workers.
+os.environ.setdefault("KMP_WARNINGS", "FALSE")
+
 import argparse
 import copy
 import hashlib
@@ -47,6 +51,56 @@ PARAMETERS = ('mchirp', 'eta', 'spin1z', 'spin2z', 'eclipticlongitude',
               'eclipticlatitude', 'inclination', 'tc', 'polarization', 'coa_phase')
 
 
+from hwilas.waveforms.cli import parse_approximant
+from hwilas.waveforms.plugins import external_generator, reference_frequency, prepare_generator
+
+
+def final_waveform_model(args):
+    return getattr(args, 'refinement_waveform_model', None) or args.waveform_model
+
+
+def stage_settings(args, refinement=False):
+    """Resolve each refinement setting independently from the optimisation stage."""
+    settings = dict(waveform_model=args.waveform_model, orbit=getattr(args, 'orbit', 'analytic'),
+                    f_ref=getattr(args, 'f_ref', args.f_lower),
+                    generator_keywords=dict(getattr(args, 'generator_keywords', {})))
+    if refinement:
+        for key, attribute in [('waveform_model','refinement_waveform_model'),
+                               ('orbit','refinement_orbit'), ('f_ref','refinement_f_ref')]:
+            value = getattr(args, attribute, None)
+            if value is not None:
+                settings[key] = value
+        settings['generator_keywords'].update(getattr(args, 'refinement_generator_keywords', None) or {})
+    prepared = getattr(args, 'prepared_generator_keywords', {})
+    settings['generator_keywords'].update(prepared.get('refinement' if refinement else 'optimisation', {}))
+    return settings
+
+
+def reseed_refinement(candidates, kwargs, lower, upper, phase_count):
+    """Compare transferred seeds using only the final model's physical statistic."""
+    best_stat, best = -np.inf, None
+    physical_kwargs = {**kwargs, 'logarithmic_mass': False}
+    phases = np.linspace(lower[9], upper[9], phase_count, endpoint=False)
+    for seed in candidates:
+        for phase in [seed[9], *phases]:
+            candidate = np.asarray(seed).copy()
+            candidate[9] = phase
+            statistic, physical = profile_physical_fit(candidate, **physical_kwargs)
+            if statistic > best_stat:
+                best_stat, best = statistic, physical
+    if best is None or not np.isfinite(best_stat) or best_stat <= 0:
+        raise ValueError('Transferred seeds have no positive final-model fit')
+    return best_stat, best
+
+
+def generator_keyword_value(value):
+    """Accept JSON numbers, booleans and arrays, or an unquoted string."""
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return value
+
+
 def _de_objective(position, objective_kwargs):
     """Scalar physical-fit objective, pickleable for spawned DE workers."""
     return -compute_statistic_core(position, **objective_kwargs)
@@ -90,6 +144,62 @@ class CircularStar(ps.backend.topology.Star):
         result[..., self.circular] = lower[self.circular]+(
             position[..., self.circular]-lower[self.circular]) % width[self.circular]
         return result
+
+
+class CircularDEStrategy:
+    """Differential mutation in physical coordinates with periodic angular seams."""
+
+    def __init__(self, parameters, lower, upper, strategy, mutation, recombination):
+        self.geometry = CircularStar(parameters, lower, upper)
+        self.bounds = (np.asarray(lower), np.asarray(upper))
+        self.strategy = strategy
+        self.mutation = mutation
+        self.recombination = recombination
+        self.scale = None
+
+    def __call__(self, candidate, population, rng=None):
+        # SciPy calls candidates in order; use one dithered scale per generation.
+        if candidate == 0 or self.scale is None:
+            self.scale = rng.uniform(*self.mutation)
+        indices = np.delete(np.arange(len(population)), candidate)
+        rng.shuffle(indices)
+        r = population[indices[:5]]
+        current, best = population[candidate], population[0]
+        difference = lambda a, b: self.geometry.displacement(a, b, self.bounds)
+        kind = self.strategy[:-3]
+        if kind == 'best1':
+            mutant = best+self.scale*difference(r[0], r[1])
+        elif kind == 'rand1':
+            mutant = r[0]+self.scale*difference(r[1], r[2])
+        elif kind == 'best2':
+            mutant = best+self.scale*(difference(r[0], r[2])+difference(r[1], r[3]))
+        elif kind == 'rand2':
+            mutant = r[0]+self.scale*(difference(r[1], r[3])+difference(r[2], r[4]))
+        elif kind == 'randtobest1':
+            mutant = r[0]+self.scale*(difference(best, r[0])+difference(r[1], r[2]))
+        elif kind == 'currenttobest1':
+            mutant = current+self.scale*(difference(best, current)+difference(r[0], r[1]))
+        else:
+            raise ValueError(f'Unsupported DE strategy: {self.strategy}')
+        dimensions = population.shape[1]
+        fill = int(rng.integers(dimensions) if hasattr(rng, 'integers') else rng.randint(dimensions))
+        crossovers = rng.uniform(size=dimensions) < self.recombination
+        if self.strategy.endswith('bin'):
+            crossovers[fill] = True
+            trial = np.where(crossovers, mutant, current)
+        else:
+            trial = current.copy()
+            crossovers[0] = True
+            for offset in range(dimensions):
+                if not crossovers[offset]:
+                    break
+                index = (fill+offset) % dimensions
+                trial[index] = mutant[index]
+        lower, upper = self.bounds
+        circular = self.geometry.circular
+        trial[circular] = lower[circular]+(trial[circular]-lower[circular]) % (upper-lower)[circular]
+        # SciPy retains its usual random repair for out-of-bounds nonangular values.
+        return trial
 
 
 def optimise_population(args, population, lower, upper, kwargs, event_index):
@@ -145,7 +255,9 @@ def optimise_population(args, population, lower, upper, kwargs, event_index):
             n_processes=args.n_processes if args.n_processes>1 else None, verbose=True, **kwargs)
     objective = partial(_de_objective, objective_kwargs=kwargs)
     options = dict(bounds=list(zip(lower, upper)), init=population,
-        maxiter=args.n_iterations, seed=args.seed+event_index, strategy=args.de_strategy,
+        maxiter=args.n_iterations, seed=args.seed+event_index, strategy=CircularDEStrategy(
+            [name for name in PARAMETERS if name != 'tc'][:len(lower)], lower, upper,
+            args.de_strategy, args.de_mutation, args.de_recombination),
         mutation=tuple(args.de_mutation), recombination=args.de_recombination,
         tol=args.de_tol, atol=args.de_atol, polish=False, updating='deferred')
     # Both serial and parallel DE update once per generation for repeatability.
@@ -195,6 +307,18 @@ def _data_frequencyseries(data):
             for c, ts in data.items()}
 
 
+class OEMInterpolationNotice(logging.Filter):
+    """Keep the expected OEM spline notice available at debug verbosity."""
+
+    def filter(self, record):
+        if record.getMessage() == (
+            'OEM preferred interpolation method ignored, using spline '
+            'interpolation (see InterpolatedOrbits for details)'):
+            record.levelno, record.levelname = logging.DEBUG, 'DEBUG'
+            return logging.getLogger(record.name).isEnabledFor(logging.DEBUG)
+        return True
+
+
 @lru_cache(maxsize=2)
 def _thm_orbit(kind):
     """Reuse the immutable equatorial orbit interpolation in each worker process."""
@@ -203,6 +327,9 @@ def _thm_orbit(kind):
         return AnalyticOrbits()
     from lisaorbits import OEMOrbits
     from tdispline.numpy.orbits import OrbitInterpolant
+    orbit_logger = logging.getLogger('lisaorbits.oem')
+    if not any(isinstance(item, OEMInterpolationNotice) for item in orbit_logger.filters):
+        orbit_logger.addFilter(OEMInterpolationNotice())
     return OrbitInterpolant(OEMOrbits.from_included('esa-trailing'), npoints=100000)
 
 
@@ -225,7 +352,8 @@ def build_aligned_waveform(v, data, waveform_params_shared, raise_err=False, wav
                         f_upper=waveform_params_shared.get('f_upper',.09),
                         pre_merger_days=1., taper_seconds=3600.,
                         tdi=waveform_params_shared.get('tdi','2'), channels=channels,
-                        reference_tc=p['tc']-float(first.epoch))
+                        reference_tc=p['tc']-float(first.epoch),
+                        f_ref=waveform_params_shared.get('f_ref'))
         model = waveform_params_shared.get('waveform_model', 'fastbhb').lower()
         if model == 'phenomthm':
             from hwilas.waveforms.phenomthm import get_td_waveform_from_phenomthm
@@ -237,7 +365,7 @@ def build_aligned_waveform(v, data, waveform_params_shared, raise_err=False, wav
             right = min(len(first), int(np.ceil((p['tc']+86400.-float(first.epoch))/dt)))
             oversampling = int(waveform_params_shared.get('thm_oversampling', 4))
             origin = float(waveform_params_shared.get('data_time_origin', 0.))
-            raw = get_td_waveform_from_phenomthm('PhenomTHM', tdi=settings['tdi'], **p,
+            generation = dict(p, tdi=settings['tdi'],
                 start_time=float(first.epoch)+left*dt, delta_t=dt/oversampling,
                 length=(right-left)*oversampling, ifos=channels,
                 f_lower=cutoff, f_ref=float(waveform_params_shared.get('f_ref', cutoff)),
@@ -245,6 +373,9 @@ def build_aligned_waveform(v, data, waveform_params_shared, raise_err=False, wav
                 data_time_origin=origin, source_oversampling=1,
                 response_nodes=int(waveform_params_shared.get('thm_response_nodes', 16384)),
                 mode_array=DEFAULT_THM_MODE_ARRAY)
+            generation.update(waveform_params_shared.get('generator_keywords', {}))
+            logger.debug('THM generator keywords: %s', waveform_params_shared.get('generator_keywords', {}))
+            raw = get_td_waveform_from_phenomthm('PhenomTHM', **generation)
             tm = {c: np.zeros(len(first)) for c in channels}
             for c in channels:
                 # Anti-alias before returning to the detector cadence.
@@ -253,16 +384,27 @@ def build_aligned_waveform(v, data, waveform_params_shared, raise_err=False, wav
             cutoff = lower_frequency_for_duration(p,settings)
             settings['f_lower'] = cutoff
             # Translate orbit and time together; every candidate uses the same FFT grid.
+            settings['generator_keywords'] = waveform_params_shared.get('generator_keywords', {})
             tm = template(p,float(first.epoch),len(first),settings,modes=DEFAULT_HM_MODE_ARRAY)
         else:
-            raise ValueError(f'Unknown optimisation waveform model: {model}')
+            cutoff = settings['f_lower']
+            generation = dict(p, delta_t=first.delta_t, start_time=float(first.epoch),
+                length=len(first), ifos=channels, f_lower=cutoff, f_upper=settings['f_upper'],
+                f_ref=waveform_params_shared.get('f_ref', 0.), orbit=waveform_params_shared.get('orbit','analytic'),
+                data_time_origin=waveform_params_shared.get('data_time_origin'))
+            generation.update(waveform_params_shared.get('generator_keywords', {}))
+            raw = external_generator(model)(approximant=model, tdi=settings['tdi'], **generation)
+            tm = {c:np.asarray(raw[c].data)*settings['laser_frequency'] for c in channels}
+            if any(len(raw[c]) != len(first) or not np.isclose(raw[c].delta_t, first.delta_t)
+                   or not np.isclose(float(raw[c].epoch),float(first.epoch),rtol=0.,atol=1e-6) for c in channels):
+                raise ValueError('External waveform grid differs from the event grid')
         t = float(first.epoch)+np.arange(len(first))*first.delta_t
         ramp = .5-.5*np.cos(np.pi*np.clip((t-(p['tc']-86400.))/3600.,0,1))
         result = {}
         for c in channels:
             h = first.delta_t*np.fft.rfft(tm[c]*ramp)
             h[:int(cutoff/(1/(len(first)*first.delta_t)))] = 0
-            if model == 'phenomthm':
+            if model != 'fastbhb':
                 h[np.fft.rfftfreq(len(first), first.delta_t) > settings['f_upper']] = 0
             result[c] = FrequencySeries(h,delta_f=1/(len(first)*first.delta_t),epoch=first.epoch)
         return result
@@ -497,16 +639,29 @@ def load_arguments():
     parser.add_argument("--psd-files",nargs='+',action=KeyValueAction,
                         help="Channel-specific PSDs as channel:filename pairs")
     parser.add_argument("--f-upper",type=float,default=.09)
-    parser.add_argument('--waveform-model', type=str.lower, choices=['fastbhb', 'phenomthm'],
+    parser.add_argument('--approximant', '--waveform-model', dest='waveform_model', type=parse_approximant,
                         default='fastbhb', help='Physical follow-up waveform; detection bank is unchanged')
+    parser.add_argument('--refinement-approximant', '--refinement-waveform-model',
+                        dest='refinement_waveform_model', type=parse_approximant,
+                        help='Optional final model for phase reseeding, local refinement and output')
     parser.add_argument('--mass-coordinate', choices=['log', 'linear'], default='log',
                         help='Chirp-mass coordinate for swarm sampling and local refinement')
-    parser.add_argument('--orbit', choices=['analytic', 'esa'], default='esa')
+    parser.add_argument('--orbits', '--orbit', dest='orbit', choices=['analytic', 'esa'], default='analytic')
+    parser.add_argument('--refinement-orbits', dest='refinement_orbit', choices=['analytic', 'esa'],
+                        help='Refinement orbits; defaults to --orbits')
+    parser.add_argument('--refinement-f-ref', type=float, help='Refinement phase reference frequency; defaults to --f-ref')
     parser.add_argument('--data-time-origin', type=float,
                         help='Absolute time of data sample zero; otherwise use stored data_time_origin/t0_raw')
-    parser.add_argument('--f-ref', type=float, help='Fixed THM phase reference frequency; default: f-lower')
+    parser.add_argument('--f-ref', type=float, help='Optimisation phase reference frequency in Hz; defaults to f-lower')
     parser.add_argument('--thm-oversampling', type=int, default=4)
     parser.add_argument('--thm-response-nodes', type=int, default=16384)
+    parser.add_argument('--generator-keywords', nargs='+', action=KeyValueAction,
+                        type=generator_keyword_value, default=None, metavar='KEY:VALUE',
+                        help='Generator settings, e.g. response_nodes:4096 padding:1000; '
+                             'values accept JSON numbers, booleans, arrays or strings')
+    parser.add_argument('--refinement-generator-keywords', nargs='+', action=KeyValueAction,
+                        type=generator_keyword_value, default=None, metavar='KEY:VALUE',
+                        help='Override or add generator keywords for refinement')
     parser.add_argument('--harmonic-seed-factors', type=float, nargs='+',
                         help='Chirp-mass seed multipliers; THM defaults to 1, 1.5, 2 for higher-mode aliases')
     parser.add_argument('--optimizer', '--optimiser', choices=['pso', 'de'], type=str.lower,
@@ -536,14 +691,42 @@ def load_arguments():
                         help="Physical coalescence phases checked before the swarm; default 16")
     parser.add_argument("--previous-parameter-file",
                         help="Flag candidates within the saved optimisation windows of this earlier round")
+    parser.add_argument(
+        "--previous-event-files",
+        nargs='+',
+        help=(
+            "Earlier event catalogues (HDF5 or CSV) used to exclude candidates within "
+            "--minimum-peak-separation before optimisation"
+        )
+    )
     args = parser.parse_args()
+    args.generator_keywords = args.generator_keywords or {}
+    reserved = set(PARAMETERS) | {'mass1', 'mass2', 'distance', 'start_time', 'delta_t',
+        'length', 'ifos', 'tdi', 'data_time_origin', 'f_lower', 'f_ref', 'orbit'}
+    for keywords in [args.generator_keywords, args.refinement_generator_keywords or {}]:
+        if reserved.intersection(keywords):
+            parser.error('Generator keywords cannot override fitted parameters or grid/reference settings: '
+                         + ', '.join(sorted(reserved.intersection(keywords))))
     if args.f_ref is None:
-        args.f_ref = args.f_lower
+        args.f_ref = reference_frequency(args.waveform_model, args.f_lower)
+    for stage in [stage_settings(args), stage_settings(args, True)]:
+        if stage['waveform_model'] == 'fastbhb' and stage['orbit'] != 'analytic':
+            parser.error('FastBHB supports analytic orbits only; use THM for ESA orbits')
+        if not np.isfinite(stage['f_ref']) or (stage['f_ref'] < args.f_lower
+                if stage['waveform_model'] in ('fastbhb','phenomthm') else stage['f_ref'] < 0):
+            parser.error('Built-in models require finite f-ref >= f-lower; external models require nonnegative f-ref')
+        if stage['waveform_model'] not in ('fastbhb','phenomthm'):
+            validate = getattr(external_generator(stage['waveform_model']), 'validate_settings', None)
+            if validate is not None:
+                try:
+                    validate(f_ref=stage['f_ref'], orbit=stage['orbit'], **stage['generator_keywords'])
+                except ValueError as error:
+                    parser.error(str(error))
     if args.harmonic_seed_factors is None:
-        args.harmonic_seed_factors = [1., 1.5, 2.] if args.waveform_model == 'phenomthm' else [1.]
+        args.harmonic_seed_factors = [1., 1.5, 2.] if final_waveform_model(args) == 'phenomthm' else [1.]
     if not np.isfinite(args.harmonic_seed_factors).all() or min(args.harmonic_seed_factors) <= 0:
         parser.error('Harmonic seed factors must be finite and positive')
-    if not np.isfinite(args.f_ref) or args.f_ref < args.f_lower or args.thm_oversampling < 1 or args.thm_response_nodes < 2:
+    if args.thm_oversampling < 1 or args.thm_response_nodes < 2:
         parser.error('Require f-ref >= f-lower, positive THM oversampling and at least two response nodes')
     try:
         event_partition(0, args.event_fraction)
@@ -557,6 +740,8 @@ def load_arguments():
         parser.error('Sky sweep interval must be nonnegative')
     if args.statistic_threshold < 0 or args.minimum_peak_separation < 0:
         parser.error("Statistic threshold and minimum separation must be nonnegative")
+    if stage_settings(args, True) != stage_settings(args) and not args.polish_evaluations:
+        parser.error('A refinement waveform model requires positive polish-evaluations')
     if min(args.n_particles,args.n_iterations,args.n_processes,args.event_workers,args.phase_seed_count)<1:
         parser.error("Particle, iteration and process counts must be positive")
 
@@ -632,6 +817,65 @@ def get_events_to_optimise(args):
         len(candidate_stat),
         args.statistic_threshold
     )
+
+    def event_times(table):
+        if 'tc' in table:
+            return np.asarray(table['tc'], dtype=float)
+        if 'time_s' in table:
+            return np.asarray(table['time_s'], dtype=float)
+        if 'end_time' in table:
+            return np.asarray(table['end_time'], dtype=float)
+        channels = [key[5:] for key in table if key.startswith('time_')]
+        if channels:
+            return np.mean([table[f'time_{channel}'] for channel in channels], axis=0)
+        channels = [key[5:-8] for key in table if key.startswith('time_') and key.endswith('_seconds')]
+        if channels:
+            return np.mean([table[f'time_{channel}_seconds'] for channel in channels], axis=0)
+        raise ValueError('Could not determine event times from previous event table')
+
+    def load_previous_times(path):
+        path = Path(path)
+        if path.suffix.lower() == '.csv':
+            table = np.genfromtxt(path, delimiter=',', names=True, dtype=None, encoding='utf-8')
+            names = table.dtype.names
+            if names is None:
+                raise ValueError(f'CSV previous event file has no header columns: {path}')
+            if table.shape == (0,):
+                return np.array([], dtype=float)
+            columns = {name: np.atleast_1d(table[name]) for name in names}
+            return event_times(columns)
+        with h5py.File(path, 'r') as f:
+            table = {
+                key: value[:] for key, value in f.items()
+                if isinstance(value, h5py.Dataset) and value.ndim == 1
+            }
+        return event_times(table)
+
+    previous_files = list(getattr(args, 'previous_event_files', []) or [])
+    if getattr(args, 'previous_parameter_file', None):
+        previous_files.append(args.previous_parameter_file)
+    previous_files = list(dict.fromkeys(str(path) for path in previous_files))
+    if previous_files:
+        previous_times = np.concatenate([load_previous_times(path) for path in previous_files])
+        previous_times = np.asarray(previous_times, dtype=float)
+        if not np.isfinite(previous_times).all():
+            raise ValueError('Previous event times must be finite')
+        far_from_previous = np.all(
+            np.abs(candidate_time[:, None] - previous_times[None, :]) > args.minimum_peak_separation,
+            axis=1
+        )
+        excluded = int(np.count_nonzero(~far_from_previous))
+        candidate_stat = candidate_stat[far_from_previous]
+        candidate_time = candidate_time[far_from_previous]
+        for channel in args.optimisation_channels:
+            candidate_times_by_channel[channel] = candidate_times_by_channel[channel][far_from_previous]
+        candidate_template_id = candidate_template_id[far_from_previous]
+        logger.info(
+            "%d events remain after excluding %d near previous events within %.1f s",
+            len(candidate_stat),
+            excluded,
+            args.minimum_peak_separation
+        )
 
     # Keep loudest-first representatives without confusing sorted and original indices.
     kept = []
@@ -821,7 +1065,9 @@ def _optimise_event(task):
                   f_ref=getattr(args, 'f_ref', args.f_lower), orbit=getattr(args, 'orbit', 'analytic'),
                   data_time_origin=getattr(args, 'data_time_origin', 0.),
                   thm_oversampling=getattr(args, 'thm_oversampling', 4),
-                  thm_response_nodes=getattr(args, 'thm_response_nodes', 16384))
+                  thm_response_nodes=getattr(args, 'thm_response_nodes', 16384),
+                  generator_keywords=getattr(args, 'generator_keywords', {}))
+    shared.update(stage_settings(args))
     kwargs = dict(data=data,psd=psds,waveform_params_shared=shared,
                   optimisation_channels=args.fit_channels,
                   tc_reference=seed[7],time_bounds=(lower[7],upper[7]))
@@ -878,6 +1124,19 @@ def _optimise_event(task):
     cost, best = optimise_population(args,population,shape_lower,shape_upper,kwargs,idx)
     if not np.isfinite(cost) or -cost<initial_fit_stat:
         best = shape_seed
+    refinement_settings = stage_settings(args, True)
+    if refinement_settings != stage_settings(args):
+        # Re-evaluate both seeds in THM; statistics from different models are incomparable.
+        _, transferred = profile_physical_fit(best, **kwargs, raise_err=True)
+        shared.update(refinement_settings)
+        initial_fit_stat, seed = reseed_refinement(
+            [transferred, seed], kwargs, lower, upper, args.phase_seed_count)
+        kwargs['tc_reference'] = seed[7]
+        best = seed[shape_indices].copy()
+        if logarithmic_mass:
+            best[0] = np.log10(best[0])
+        logger.info('Event %d refinement model=%s, orbit=%s, reseeded statistic=%.6g',
+                    idx, shared['waveform_model'], shared['orbit'], initial_fit_stat)
     polish_evaluations,polish_success = 0,False
     if args.polish_evaluations:
         # Normalise parameter units for a bounded local refinement.
@@ -928,7 +1187,7 @@ def _optimise_event(task):
                   optimisation_window_end=source_epoch+j1*dt,
                   in_previous_window=previous_flag, previous_event_index=previous_index,
                   polish_evaluations=polish_evaluations,polish_success=polish_success)
-    record['f_lower'] = (args.f_lower if shared['waveform_model'] == 'phenomthm' else
+    record['f_lower'] = (args.f_lower if shared['waveform_model'] != 'fastbhb' else
         lower_frequency_for_duration(record,
         dict(f_lower=args.f_lower, f_upper=args.f_upper, pre_merger_days=1.)))
     logger.info(
@@ -967,10 +1226,20 @@ def main():
             ends.append(starts[-1]+len(f[args.optimisation_channels[0]])*dt)
     if getattr(args, 'data_time_origin', None) is None:
         args.data_time_origin = metadata.get('data_time_origin', metadata.get('t0_raw'))
-    if getattr(args, 'waveform_model', 'fastbhb') == 'phenomthm' and args.data_time_origin is None:
-        if getattr(args, 'orbit', 'esa') == 'esa':
-            raise ValueError('THM ESA fits require --data-time-origin or stored data_time_origin/t0_raw metadata')
+    if any(stage_settings(args, refinement)['waveform_model'] != 'fastbhb'
+           for refinement in (False, True)) and args.data_time_origin is None:
+        if any(stage_settings(args, refinement)['waveform_model'] != 'fastbhb' and
+               stage_settings(args, refinement)['orbit'] == 'esa' for refinement in (False, True)):
+            raise ValueError('ESA fits require --data-time-origin or stored data_time_origin/t0_raw metadata')
         args.data_time_origin = 0.
+    args.prepared_generator_keywords = {}
+    for refinement in (False, True):
+        stage = stage_settings(args, refinement)
+        prepared = prepare_generator(stage['waveform_model'], orbit=stage['orbit'],
+            data_time_origin=args.data_time_origin, start_time=min(starts), end_time=max(ends),
+            keywords=stage['generator_keywords'])
+        args.prepared_generator_keywords['refinement' if refinement else 'optimisation'] = prepared
+    signature.update(json.dumps(args.prepared_generator_keywords,sort_keys=True).encode())
     optimisation_signature = signature.hexdigest()
     epoch, end = min(starts), max(ends)
     signals = {c:np.zeros(round((end-epoch)/dt)) for c in args.output_timeseries_channels}
@@ -1021,20 +1290,28 @@ def main():
                            de_recombination=args.de_recombination,
                            de_tol=args.de_tol, de_atol=args.de_atol,
                            amplitude_model='positive physical distance; physical coalescence phase')
-            model = getattr(args, 'waveform_model', 'fastbhb')
+            final = stage_settings(args, True)
+            model = final['waveform_model']
+            f.attrs['fastbhb_phase_reference_applied'] = True
+            f.attrs['population_waveform_model'] = args.waveform_model
+            f.attrs['population_f_ref'] = args.f_ref
+            f.attrs['population_orbit'] = args.orbit
+            f.attrs['population_generator_keywords'] = json.dumps(stage_settings(args)['generator_keywords'])
             f.attrs.update(waveform_model=model,
-                           approximant='IMRPhenomTHM' if model == 'phenomthm' else 'IMRPhenomHM',
+                           approximant={'phenomthm':'IMRPhenomTHM','fastbhb':'IMRPhenomHM'}.get(model,model),
                            mode_array=DEFAULT_THM_MODE_ARRAY if model == 'phenomthm' else DEFAULT_HM_MODE_ARRAY,
-                           f_ref=getattr(args, 'f_ref', args.f_lower),
-                           orbit=getattr(args, 'orbit', 'analytic') if model == 'phenomthm' else 'analytic',
+                           f_ref=final['f_ref'], orbit=final['orbit'],
                            data_time_origin=float(args.data_time_origin or 0.),
                            thm_oversampling=getattr(args, 'thm_oversampling', 4),
                            thm_response_nodes=getattr(args, 'thm_response_nodes', 16384))
+            f.attrs['generator_keywords'] = json.dumps(final['generator_keywords'])
             f.attrs['mass_coordinate'] = getattr(args, 'mass_coordinate', 'log')
             f.attrs['harmonic_seed_factors'] = getattr(args, 'harmonic_seed_factors', [1.])
             f.create_dataset('seed_harmonic_factor', data=np.asarray([r.get('seed_harmonic_factor', 1.) for r in records]))
             if args.previous_parameter_file:
                 f.attrs['previous_parameter_file'] = args.previous_parameter_file
+            if args.previous_event_files:
+                f.attrs['previous_event_files'] = json.dumps(args.previous_event_files)
             for key in (*PARAMETERS,'mass1','mass2','global_event_index','initial_template_id','initial_stat','optimised_stat',
                         'distance','amplitude_phase','initial_time','initial_fit_stat','f_lower',
                         'optimisation_window_start','optimisation_window_end',

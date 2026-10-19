@@ -1,4 +1,5 @@
 """Validate a bank directly, prepare cached recovery, run shards, or merge reports."""
+from hwilas.waveforms.cli import add_waveform_arguments, apply_waveform_config
 import argparse
 import json
 import logging
@@ -50,7 +51,7 @@ def merge(paths):
 
 def validate(a):
     """Measure independent prior draws against regenerated bank waveforms."""
-    cfg = load_config(a.config)
+    cfg = apply_waveform_config(a, load_config(a.config))
     init_worker(cfg)
     bank = Bank(cfg)
     tests = draw(np.random.default_rng(a.seed), a.n, cfg['prior'])
@@ -84,6 +85,8 @@ def main():
     sub = parser.add_subparsers(dest='command', required=True)
     p = sub.add_parser('validate', help='Direct independent fitting-factor validation')
     p.add_argument('--config', required=True)
+    add_waveform_arguments(p)
+    p.set_defaults(waveform_type=None,orbit=None)
     p.add_argument('--bank-file', required=True)
     p.add_argument('--output-file', required=True)
     p.add_argument('--n', type=int, default=400)
@@ -92,6 +95,8 @@ def main():
     p.add_argument('--verbose', action='store_true')
     p = sub.add_parser('prepare')
     p.add_argument('--config', required=True)
+    add_waveform_arguments(p)
+    p.set_defaults(waveform_type=None,orbit=None)
     p.add_argument('--bank-file', required=True)
     p.add_argument('--cache-dir', required=True)
     p = sub.add_parser('run')
@@ -115,7 +120,7 @@ def main():
             logging.getLogger().setLevel(logging.DEBUG)
         validate(a)
     elif a.command == 'prepare':
-        prepare(load_config(a.config), a.bank_file, a.cache_dir)
+        prepare(apply_waveform_config(a, load_config(a.config)), a.bank_file, a.cache_dir)
     elif a.command == 'run':
         if min(a.n, a.shard_count, a.nproc, a.template_batch) < 1 or a.seed < 0 or not 0 <= a.shard_index < a.shard_count:
             parser.error('Invalid injection, worker, seed, batch or shard controls')

@@ -2,7 +2,7 @@
 
 FASTBHB_CHANNELS = ('LISA_A', 'LISA_E', 'LISA_T')
 from .constants import AET_CHANNELS, LISA_CHANNELS
-from .plugins import available_approximants, get_external_generator
+from .plugins import available_approximants, get_external_generator, normalise_approximant
 
 
 # Approximant name(s) routed to the time-domain FastBHB (lisabeta) generator.
@@ -39,6 +39,7 @@ def get_fd_waveform(
         Dictionary mapping channel names (``'LISA_A'``/``'LISA_E'``/``'LISA_T'``)
         to TimeSeries.
     """
+    approximant = normalise_approximant(approximant)
     if approximant.lower() in FASTBHB_APPROXIMANTS:
         from .fastbhb import get_td_waveform_from_fastbhb
         # The FastBHB generator needs a detector-frame sampling grid. If the

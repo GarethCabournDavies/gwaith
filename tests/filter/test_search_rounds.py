@@ -96,7 +96,7 @@ def test_real_fastbhb_two_round_fit_and_residual(tmp_path,monkeypatch,n_processe
     p = dict(mass1=2e6,mass2=1e6,spin1z=.1,spin2z=-.1,eclipticlongitude=1.,
              eclipticlatitude=.2,inclination=.8,polarization=.4,coa_phase=.3,distance=1e4)
     mc,eta = mchirp_eta_from_mass1_mass2(p['mass1'],p['mass2'])
-    shared = dict(f_lower=3e-5,f_upper=.09,tdi='2',distance=p['distance'],template_scale=1.)
+    shared = dict(f_lower=3e-5,f_ref=3e-5,f_upper=.09,tdi='2',distance=p['distance'],template_scale=1.)
     injected = {c:np.zeros(n) for c in channels}
     rng = np.random.default_rng(17)
     noise = {c:rng.normal(scale=1e-20,size=n) for c in channels}
@@ -148,6 +148,7 @@ def test_real_fastbhb_two_round_fit_and_residual(tmp_path,monkeypatch,n_processe
             '--n-processes',str(n_processes),'--event-workers',str(event_workers),
             '--n-iterations','1','--polish-evaluations','0',
             '--optimisation-window-before','172800','--optimisation-window-after','172800',
+            '--minimum-peak-separation','3600',
             '--f-lower','3e-5','--bounds-window-relative-to-initial','tc:0.1',
             '--minimum-bounds',*lower,'--maximum-bounds',*upper]
         if r:

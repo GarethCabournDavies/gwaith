@@ -16,8 +16,6 @@ def load_bank(path):
         n = len(cols["mass1"])
         if any(len(v) != n for v in cols.values()) or not n:
             raise ValueError("Bank columns must have equal, nonzero lengths")
-        if "approximant" in f and any(a not in (b"FastBHB", "FastBHB") for a in f["approximant"][:]):
-            raise ValueError("Local search requires a FastBHB bank")
     return [{k: float(v[i]) for k, v in cols.items()} for i in range(n)]
 
 
@@ -33,7 +31,8 @@ def write_bank(path, params, settings, **attrs):
         if params and all('pre_merger_seconds' in p for p in params):
             f['pre_merger_seconds'] = np.array([p['pre_merger_seconds'] for p in params], float)
             f['t_obs_start'][:] = f['pre_merger_seconds'][:]
-        f["approximant"] = np.array([b"FastBHB"]*n, dtype="S7")
+        f["approximant"] = np.array([settings.get('approximant','FastBHB')]*n,
+                                    dtype=h5py.string_dtype())
         f["total_mass"] = f["mass1"][:]+f["mass2"][:]
         f["q"] = f["mass1"][:]/f["mass2"][:]
         f.attrs.update(**attrs)

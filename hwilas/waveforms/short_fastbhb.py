@@ -66,6 +66,9 @@ def template(params, t_start, n, settings, modes=None):
     gen.wvf_pars["minf"] = settings.get("f_lower", 3e-5)
     gen.wvf_pars["maxf"] = settings.get("f_upper", .09)
     gen.wvf_pars['timetomerger_max'] = None
+    if settings.get('f_ref') is not None:
+        gen.wvf_pars.update(fref_for_phiref=settings['f_ref'], phiref=0.)
+    gen.wvf_pars.update(settings.get('generator_keywords', {}))
     logger.debug("FastBHB modes=%s samples=%d cadence=%g orbit_phase=%g", modes, n, dt, pos)
     A, E, T = gen.get_td_tdiaet(template=p, tdi2=(str(settings.get("tdi", "2")) == "2"))
     k0 = round(t0/dt)

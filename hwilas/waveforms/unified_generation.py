@@ -78,6 +78,8 @@ def generate_waveform(
         If approximant is unknown, required parameters are missing, or channel
         specifications are incompatible with the chosen approximant.
     """
+    from .plugins import normalise_approximant
+    approximant = normalise_approximant(approximant)
     # Extract parameters and apply defaults
     mass1 = float(signal['mass1'])
     mass2 = float(signal['mass2'])

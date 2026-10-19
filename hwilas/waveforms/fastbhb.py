@@ -262,6 +262,10 @@ def get_td_waveform_from_fastbhb(
         modes=params.get('mode_array', DEFAULT_FASTBHB_MODES),
     )
 
+    if params.get('orbit', 'analytic') != 'analytic':
+        raise ValueError('Native FastBHB requires analytic orbits')
+    if params.get('f_ref') is not None:
+        fast_hm.wvf_pars.update(fref_for_phiref=float(params['f_ref']), phiref=0.)
     template = _build_ldc_template(params)
     A, E, T = fast_hm.get_td_tdiaet(
         template=template,

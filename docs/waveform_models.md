@@ -49,7 +49,7 @@ supplied with equatorial `get_positions` and `get_ltts` methods. The default
 
 `hwilas.waveforms.unified_generation.generate_waveform` also accepts these
 model names and returns arrays on its supplied uniform detector time grid.
-The matched-filter search's short-template implementation remains FastBHB.
+The matched-filter search also accepts registered external providers through `--approximant`.
 
 ## BBHx licensing
 
@@ -62,7 +62,7 @@ as evidence of a permissive license. Historical releases must be checked
 individually if their licensing matters.
 
 There is no GPL exception for BBHx in hwilas. BBHx is not a bundled model or
-project/environment dependency. Any future BBHx provider belongs in a separate
+project/environment dependency. The BBHx provider is installed as a separate
 external distribution. Entry-point separation describes the software boundary;
 it does not establish that a combined installation has no GPL obligations.
 
@@ -105,3 +105,64 @@ passes the detector window and model settings, converts XYZ to AET as needed,
 and filters the requested channels. Providers used there must expose a complete
 XYZ or AET set by default. Search CLI short-template model selection remains
 FastBHB; this hook currently covers the public waveform-generation interfaces.
+
+
+## Optimisation and refinement settings
+
+`hwilas_optimise_snr_peaks` supports FastBHB (IMRPhenomHM) and PhenomTHM with
+TDI spline. Each refinement option inherits the corresponding optimisation
+value when omitted:
+
+```bash
+--approximant fastbhb --orbits analytic --f-ref 3e-5 \
+--refinement-approximant IMRPhenomTHM --refinement-orbits esa \
+--refinement-f-ref 1e-4 \
+--refinement-generator-keywords response_nodes:4096
+```
+
+`--generator-keywords key:value ...` configures optimisation; refinement inherits
+these keywords and merges any `--refinement-generator-keywords` overrides.
+`--waveform-model`, `--refinement-waveform-model` and `--orbit` remain aliases.
+FastBHB requires analytic orbits; THM supports analytic and ESA orbits. ESA needs
+the absolute `--data-time-origin` or equivalent input metadata. The default
+approximant is FastBHB, orbits are analytic, and `f_ref` defaults to `f_lower`.
+Changing any stage setting triggers phase reseeding and comparison in the
+refinement model before local fitting. Final waveform metadata records the
+refinement settings; `population_*` attributes record optimisation settings.
+
+
+## Local BBHx installation
+
+The `env_hwilas_search` environment has a CPU build of
+`uk-lisa-gs/BBHx@fix-barycentre-delay`, commit
+`2725d96d56365422a93edee8bd5b8c6a31a55faa`, installed as
+`bbhx==1.0.10+fixbarycentredelay.2725d96`, plus
+`hwilas-bbhx-provider==0.1.0`. It is discovered through `hwilas.waveforms`;
+no temporary virtual environment or `PYTHONPATH` is needed.
+
+Use `--approximant BBHx --orbits esa --f-ref 0`. For the final THM stage,
+add:
+
+```sh
+--refinement-approximant PhenomTHM --refinement-orbits esa \
+--refinement-f-ref 3e-5 --refinement-generator-keywords response_nodes:4096
+```
+Supply `--data-time-origin` if the data metadata does not contain it.
+The provider automatically converts/caches ESA OEM trajectories; an existing
+converted HDF file can be passed with `--generator-keywords 'orbit_file:"/absolute/path/orbits.h5"'`.
+
+The installed BBHx kernel retains its original peak phase reference. The
+experimental patch honoring nonzero `f_ref` is not included in this installation.
+
+The orbit backend is `lisaanalysistools==1.2.0+hwilas.h5py316`, whose runtime
+code is 1.2.0. Its packaging constraint is locally changed from `h5py<3.15`
+to `h5py>=3.15.1,<3.17` to coexist with Mojito's `h5py>=3.15.1` requirement.
+Orbit HDF reads, position/light-time interpolation and BBHx generation were
+checked with h5py 3.16.0. The original 1.2.0 backend and the newer 1.2.8 backend
+are not interchangeable for this BBHx build.
+
+Built wheels, SHA256/provenance manifest and build logs are retained in
+`examples/search/diagnostics/output/bbhx_native_dist/` (ignored local artifacts).
+To reinstall from those local wheels, select the BBHx wheel, provider wheel,
+and the **1.2.0+hwilas.h5py316** lisatools wheel; the original 1.2.0 wheel in
+that directory retains the incompatible h5py upper bound.

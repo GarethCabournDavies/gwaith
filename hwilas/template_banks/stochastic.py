@@ -14,7 +14,8 @@ from scipy.fft import ifft
 from hwilas.search.config import draw
 from hwilas.template_banks.io import load_bank, write_bank
 from hwilas.template_banks.frequency import lower_frequency_for_duration, lower_frequency_for_snr, duration_from_frequency
-from hwilas.waveforms.short_fastbhb import CHANNELS, short_template, frequency_template
+from hwilas.waveforms.short_fastbhb import CHANNELS
+from hwilas.waveforms.short_templates import short_template, frequency_template
 
 logger = logging.getLogger(__name__)
 _STATE = {}

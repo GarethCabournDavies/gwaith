@@ -55,3 +55,6 @@ pip install --user ".[test]"
 
 For Mojito preparation, search configuration and diagnostics, see
 [the search workflow](docs/mojito_search.md).
+
+To export a stable search event as MBHBS parameter/configuration YAML, see
+[the PE export command and current MBHBS capability limits](docs/mbhbs_pe_export.md).

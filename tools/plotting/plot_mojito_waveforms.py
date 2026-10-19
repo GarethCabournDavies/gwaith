@@ -149,6 +149,7 @@ def generate_signal_waveform(
     waveform_span_days=None,
     waveform="FastBHB",
     tdi_generation="1.5",
+    generator_keywords=None, f_ref=None, data_time_origin=None,
 ):
     """Regenerate a detector-frame waveform and align it to detector_times.
     
@@ -169,6 +170,10 @@ def generate_signal_waveform(
     tdi_generation : str
         TDI version ('1.5' or '2.0').
     """
+    from hwilas.waveforms.plugins import normalise_approximant, prepare_generator, reference_frequency
+    waveform = normalise_approximant(waveform)
+    signal = dict(signal)
+    if data_time_origin is not None: signal['data_time_origin'] = data_time_origin
     tc = signal["tc"]
     t_min = float(detector_times[0])
     t_max = float(detector_times[-1])
@@ -183,6 +188,9 @@ def generate_signal_waveform(
         n = int(round((hi - lo) / delta_t)) + 1
         gen_times = np.linspace(lo, hi, n)
 
+    signal.update(prepare_generator(waveform, orbit=orbit,data_time_origin=signal.get('data_time_origin'),
+        start_time=float(gen_times[0]),end_time=float(gen_times[-1])+delta_t,keywords=generator_keywords))
+    signal['f_ref'] = reference_frequency(waveform,signal.get('f_lower',1e-5),f_ref)
     # Use the unified waveform generation interface
     data = generate_waveform(
         signal,
@@ -415,22 +423,8 @@ def build_parser():
         default=2.0,
         help="Days of waveform regenerated around each coalescence (default 2).",
     )
-    parser.add_argument(
-        "--waveform",
-        default="FastBHB",
-        help=(
-            "Waveform generator name passed to get_fd_waveform "
-            "(default FastBHB)."
-        ),
-    )
-    parser.add_argument(
-        "--orbit",
-        default="analytic",
-        help=(
-            "Orbit model string forwarded to generators that support it "
-            "(default analytic)."
-        ),
-    )
+    from hwilas.waveforms.cli import add_waveform_arguments
+    add_waveform_arguments(parser, dest='waveform', aliases=('--waveform',))
     parser.add_argument(
         "--tdi-generation",
         choices=["1.5", "2"],
@@ -500,7 +494,8 @@ def main():
                     orbit=args.orbit,
                     waveform_span_days=args.waveform_span_days,
                     waveform=args.waveform,
-                    tdi_generation=args.tdi_generation,
+                    tdi_generation=args.tdi_generation, generator_keywords=args.generator_keywords,
+                    f_ref=args.f_ref,data_time_origin=args.data_time_origin,
                 )
             except Exception as exc:  # noqa: BLE001 - continue through failed signal
                 logger.warning(

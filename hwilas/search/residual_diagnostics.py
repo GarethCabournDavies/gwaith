@@ -165,7 +165,8 @@ def waveform_window(params,metadata,channels,epoch,n,dt,laser_scale=1.):
         raise ValueError('The current optimiser generator requires one-day support and a one-hour taper')
     approximant = metadata.get('approximant', 'IMRPhenomHM')
     if approximant not in ('IMRPhenomHM', 'IMRPhenomTHM'):
-        raise ValueError('Unsupported saved optimisation approximant')
+        from hwilas.waveforms.plugins import normalise_approximant
+        normalise_approximant(approximant)
     model = metadata.get('waveform_model', 'phenomthm' if approximant == 'IMRPhenomTHM' else 'fastbhb')
     expected_modes = DEFAULT_THM_MODE_ARRAY if model == 'phenomthm' else DEFAULT_HM_MODE_ARRAY
     modes=np.asarray(metadata.get('mode_array',expected_modes))
@@ -188,7 +189,11 @@ def waveform_window(params,metadata,channels,epoch,n,dt,laser_scale=1.):
                   data_time_origin=float(metadata.get('data_time_origin', 0.)),
                   thm_oversampling=int(metadata.get('thm_oversampling', 4)),
                   thm_response_nodes=int(metadata.get('thm_response_nodes', 16384)))
+    if model == 'fastbhb' and not metadata.get('fastbhb_phase_reference_applied', False):
+        shared['f_ref'] = None
     vector=np.array([params[k] for k in PARAMETERS])
+    import json
+    shared['generator_keywords'] = json.loads(metadata.get('generator_keywords', '{}'))
     fd=build_aligned_waveform(vector,dummy,shared,True,waveform_channels=channels)
     positions=np.rint((epoch+np.arange(n)*dt-start)/dt).astype(int)
     if not np.allclose((epoch-start)/dt,round((epoch-start)/dt)):

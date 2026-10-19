@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# Disable OpenMP runtime notices; set KMP_WARNINGS=TRUE to enable diagnostics.
+export KMP_WARNINGS="${KMP_WARNINGS:-FALSE}"
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 cd "$script_dir"
 OUTPUT_DIR="${OUTPUT_DIR:-output/sangria}"
@@ -11,7 +13,12 @@ psd_file_a="${psd_dir}/A_sangria_SMOOTHED_PSD.txt"
 psd_file_e="${psd_dir}/E_sangria_SMOOTHED_PSD.txt"
 psd_file_t="${psd_dir}/T_sangria_UNSMOOTHED_PSD.txt"
 psd_fit_t="${psd_dir}/T_sangria_SMOOTHED_PSD.txt"
+search_model="${SEARCH_APPROXIMANT:-fastbhb}"
+search_orbits="${SEARCH_ORBITS:-analytic}"
 tdi_generation=1.5
+data_time_origin="${DATA_TIME_ORIGIN:-0}"
+optimisation_model="${OPTIMISATION_MODEL:-fastbhb}"
+optimisation_orbit="${OPTIMISATION_ORBIT:-analytic}"
 truth_file="${OUTPUT_DIR}/sangria_truth.hdf"
 n_processes="${N_PROCESSES:-4}"
 
@@ -48,7 +55,7 @@ for ((part=0; part<template_parallelization; part++)); do
         --bank-file "$bank_file" \
         --channels LISA_A LISA_E \
         --psd-files LISA_A:"$psd_file_a" LISA_E:"$psd_file_e" \
-        --waveform-type fastbhb \
+        --approximant "$search_model" --orbits "$search_orbits" --data-time-origin "$data_time_origin" \
         --tdi-generation "$tdi_generation" \
         --padding-time 129600 \
         --end-exclusion 259200 \
@@ -94,6 +101,8 @@ subtract_dir="${OUTPUT_DIR}/round_0/subtract"
 mkdir -p "$optimise_dir" "$subtract_dir"
 
 hwilas_optimise_snr_peaks \
+    --approximant "$optimisation_model" --orbits "$optimisation_orbit" \
+    --data-time-origin "$data_time_origin" \
     --input-file "${candidate_dir}/candidates.hdf" \
     --bank-file "$bank_file" \
     --data-files "$data_file" \
@@ -165,7 +174,7 @@ for ((part=0; part<template_parallelization; part++)); do
         --bank-file "$bank_file" \
         --channels LISA_A LISA_E \
         --psd-files LISA_A:"$psd_file_a" LISA_E:"$psd_file_e" \
-        --waveform-type fastbhb \
+        --approximant "$search_model" --orbits "$search_orbits" --data-time-origin "$data_time_origin" \
         --tdi-generation "$tdi_generation" \
         --padding-time 129600 \
         --end-exclusion 259200 \
@@ -220,6 +229,8 @@ round1_optimise_dir="${OUTPUT_DIR}/round_1/optimise"
 mkdir -p "$round1_optimise_dir"
 
 hwilas_optimise_snr_peaks \
+    --approximant "$optimisation_model" --orbits "$optimisation_orbit" \
+    --data-time-origin "$data_time_origin" \
     --input-file "${round1_candidate_dir}/candidates.hdf" \
     --bank-file "$bank_file" \
     --data-files "${subtract_dir}/data_subtracted.hdf" \
@@ -310,7 +321,7 @@ for ((part=0; part<template_parallelization; part++)); do
         --bank-file "$bank_file" \
         --channels LISA_A LISA_E \
         --psd-files LISA_A:"$psd_file_a" LISA_E:"$psd_file_e" \
-        --waveform-type fastbhb \
+        --approximant "$search_model" --orbits "$search_orbits" --data-time-origin "$data_time_origin" \
         --tdi-generation "$tdi_generation" \
         --padding-time 129600 \
         --end-exclusion 259200 \
@@ -358,5 +369,7 @@ hwilas_check_search_residuals \
     --signal-files "$all_signals_file" \
     --parameter-file "$all_parameters_file" \
     --candidate-file "${residual_candidate_dir}/candidates.hdf" \
+    --signal-exclusion "${RESIDUAL_SIGNAL_EXCLUSION:-86400}" \
+    --output-statistic-plot "${final_dir}/residual_statistics.png" \
     --output-file "${final_dir}/residual_report.json" \
     --verbose

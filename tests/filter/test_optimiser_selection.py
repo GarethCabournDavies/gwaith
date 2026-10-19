@@ -65,3 +65,68 @@ def test_pso_dispatch_preserves_settings(monkeypatch):
             return -10., np.zeros(9)
     monkeypatch.setattr(module.ps.single, 'GlobalBestPSO', Swarm)
     assert module.optimise_population(args, population, lower, upper, {}, 0)[0] == -10.
+
+
+def test_generator_keywords_are_typed(monkeypatch):
+    args = cli(monkeypatch, '--generator-keywords', 'response_nodes:4096',
+               'padding:1200.5', 'condition:false', 'mode_array:[[2,2],[2,-2]]', 'name:example')
+    assert args.generator_keywords == dict(response_nodes=4096, padding=1200.5,
+        condition=False, mode_array=[[2,2],[2,-2]], name='example')
+
+
+def test_generator_keywords_cannot_replace_fitted_mass(monkeypatch):
+    with pytest.raises(SystemExit):
+        cli(monkeypatch, '--generator-keywords', 'mass1:1000000')
+
+
+def test_staged_model_uses_final_model_defaults(monkeypatch):
+    args = cli(monkeypatch, '--waveform-model', 'fastbhb',
+               '--refinement-waveform-model', 'phenomthm', '--polish-evaluations', '500')
+    assert module.final_waveform_model(args) == 'phenomthm'
+    assert args.harmonic_seed_factors == [1., 1.5, 2.]
+    with pytest.raises(SystemExit):
+        cli(monkeypatch, '--refinement-waveform-model', 'phenomthm', '--polish-evaluations', '0')
+
+
+
+def test_refinement_inherits_all_stage_settings(monkeypatch):
+    args = cli(monkeypatch, '--approximant', 'IMRPhenomTHM', '--orbits', 'esa',
+        '--f-ref', '.0001', '--generator-keywords', 'response_nodes:4096')
+    assert module.stage_settings(args, True) == module.stage_settings(args)
+    assert module.stage_settings(args, True) == dict(waveform_model='phenomthm',
+        orbit='esa', f_ref=.0001, generator_keywords={'response_nodes':4096})
+
+
+def test_refinement_overrides_are_independent(monkeypatch):
+    args = cli(monkeypatch, '--approximant', 'FastBHB', '--orbits', 'analytic',
+        '--f-ref', '.0001', '--refinement-approximant', 'IMRPhenomTHM',
+        '--refinement-orbits', 'esa', '--refinement-f-ref', '.0002',
+        '--generator-keywords', 'padding:1200', '--refinement-generator-keywords', 'response_nodes:4096')
+    assert module.stage_settings(args) == dict(waveform_model='fastbhb', orbit='analytic',
+        f_ref=.0001, generator_keywords={'padding':1200})
+    assert module.stage_settings(args, True) == dict(waveform_model='phenomthm', orbit='esa',
+        f_ref=.0002, generator_keywords={'padding':1200, 'response_nodes':4096})
+    args = cli(monkeypatch, '--approximant', 'IMRPhenomTHM', '--f-ref', '.0001',
+               '--refinement-orbits', 'esa')
+    assert module.stage_settings(args, True)['waveform_model']=='phenomthm'
+    assert module.stage_settings(args, True)['f_ref']==.0001
+
+
+@pytest.mark.parametrize('options', [('--approximant','unknown'),
+    ('--approximant','fastbhb','--orbits','esa'),
+    ('--refinement-f-ref','0'), ('--refinement-generator-keywords','mass1:100')])
+def test_invalid_stage_settings_fail(monkeypatch, options):
+    with pytest.raises(SystemExit):
+        cli(monkeypatch, *options)
+
+
+def test_external_provider_is_selectable_and_defaults_to_its_reference(monkeypatch):
+    from hwilas.waveforms import plugins
+    from importlib.metadata import EntryPoint
+    entry=EntryPoint(name='TestModel',value='unused:generate',group=plugins.ENTRY_POINT_GROUP)
+    monkeypatch.setattr(plugins.metadata,'entry_points',lambda **kw:[entry])
+    monkeypatch.setattr(module,'external_generator',lambda name:SimpleNamespace(default_f_ref=0.))
+    monkeypatch.setattr(plugins,'external_generator',lambda name:SimpleNamespace(default_f_ref=0.))
+    args=cli(monkeypatch,'--approximant','TestModel','--orbits','esa')
+    assert args.waveform_model=='testmodel' and args.f_ref==0.
+    assert module.stage_settings(args,True)==module.stage_settings(args)

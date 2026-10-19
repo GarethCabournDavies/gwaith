@@ -82,9 +82,12 @@ def waveform_from_bank(bank_file, idx, waveform_params_shared, data_length):
     temp_params = {'mode_array': bank_file["mode_array"][idx]}
     bank_wf["mode_array"] = parse_mode_array(temp_params)['mode_array']
 
-    bank_wf['f_ref'] = max(
-        waveform_params_shared.get('f_ref', 0),
-        bank_file['f_lower'][idx]
-    )
+    model = waveform_params_shared.get('approximant','fastbhb').lower()
+    if model not in ('fastbhb','phenomthm','imrphenomhm','imrphenomthm'):
+        from hwilas.waveforms.plugins import reference_frequency
+        bank_wf['f_ref'] = reference_frequency(model, float(bank_file['f_lower'][idx]),
+                                               waveform_params_shared.get('f_ref'))
+    else:
+        bank_wf['f_ref'] = max(waveform_params_shared.get('f_ref') or 0., bank_file['f_lower'][idx])
 
     return bank_wf

@@ -1,5 +1,6 @@
 """Discover independently installed waveform providers without importing them."""
 from importlib import metadata
+from functools import lru_cache
 import logging
 
 logger = logging.getLogger(__name__)
@@ -34,3 +35,39 @@ def get_external_generator(approximant):
 def available_approximants():
     """List canonical built-in and installed external names without loading models."""
     return ('FastBHB', 'PhenomTHM', *(entry.name for entry in waveform_entry_points().values()))
+
+
+def normalise_approximant(value):
+    aliases = {'fastbhb':'fastbhb', 'phenomhm':'fastbhb', 'imrphenomhm':'fastbhb',
+               'phenomthm':'phenomthm', 'imrphenomthm':'phenomthm', 'phenomthm+tdispline':'phenomthm'}
+    name = str(value).casefold()
+    if name in aliases:
+        return aliases[name]
+    if name in waveform_entry_points():
+        return name
+    raise ValueError(f'Unknown waveform {value!r}; install its hwilas.waveforms entry point; installed models: {available_approximants()}')
+
+
+@lru_cache(maxsize=16)
+def external_generator(approximant):
+    """Keep provider discovery/import outside the per-template evaluation loop."""
+    return get_external_generator(approximant)
+
+
+def reference_frequency(approximant, f_lower, requested=None):
+    if requested is not None:
+        return float(requested)
+    if approximant not in ('fastbhb', 'phenomthm'):
+        return float(getattr(external_generator(approximant), 'default_f_ref', f_lower))
+    return float(f_lower)
+
+
+def prepare_generator(approximant, *, orbit, data_time_origin, start_time, end_time, keywords=None):
+    """Let an external provider prepare immutable resources once in the parent process."""
+    keywords = dict(keywords or {})
+    if approximant not in ('fastbhb', 'phenomthm'):
+        prepare = getattr(external_generator(approximant), 'prepare', None)
+        if prepare is not None:
+            keywords = prepare(orbit=orbit, data_time_origin=data_time_origin,
+                               start_time=start_time, end_time=end_time, **keywords)
+    return keywords

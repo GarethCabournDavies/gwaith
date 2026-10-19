@@ -46,6 +46,46 @@ def test_loudest_event_selection(tmp_path):
     assert np.all(np.diff(stats) <= 0)
 
 
+@pytest.mark.parametrize('previous_kind', ['hdf', 'csv', 'parameter'])
+def test_excludes_candidates_near_previous_events(tmp_path, previous_kind):
+    candidates = tmp_path/'candidates.hdf'
+    with h5py.File(candidates, 'w') as f:
+        f['template_id'] = [0, 1, 2]
+        for c in ('A', 'E'):
+            f['trigger_id_'+c] = [0, 1, 2]
+            f['snr_'+c] = [30., 20., 10.]
+            f['time_'+c] = [100., 150., 300.]
+
+    args = dict(
+        input_file=candidates,
+        optimisation_channels=['A', 'E'],
+        statistic_threshold=0.,
+        minimum_peak_separation=40.,
+    )
+
+    if previous_kind == 'hdf':
+        previous = tmp_path/'previous.hdf'
+        with h5py.File(previous, 'w') as f:
+            f['tc'] = [130.]
+        args['previous_event_files'] = [str(previous)]
+    elif previous_kind == 'parameter':
+        previous = tmp_path/'previous_parameters.hdf'
+        with h5py.File(previous, 'w') as f:
+            f['tc'] = [130.]
+        args['previous_parameter_file'] = str(previous)
+    else:
+        previous = tmp_path/'previous.csv'
+        previous.write_text('event_id,time_s,statistic\n0,130.0,99.0\n')
+
+        args['previous_event_files'] = [str(previous)]
+
+    args = SimpleNamespace(**args)
+    stats, times, _, ids = module.get_events_to_optimise(args)
+    np.testing.assert_array_equal(ids, [2])
+    np.testing.assert_array_equal(times, [300.])
+    np.testing.assert_array_equal(stats, [np.sqrt(200.)])
+
+
 def test_file_coverage_is_half_open():
     np.testing.assert_array_equal(module.identify_file_of_coinc(
         np.array([0.,10.]),np.array([10.,20.]),np.array([10.,19.])),[1,1])
