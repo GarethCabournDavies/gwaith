@@ -28,6 +28,7 @@ def from_numpy_arrays(freq_data, noise_data, length, delta_f, low_freq_cutoff):
             f"higher than requested low-frequency cutoff ({low_freq_cutoff} Hz)"
         )
 
+    endpoint_spacing = float(freq_data[-1] - freq_data[-2])
     positive = freq_data > 0
     if not np.any(positive):
         raise ValueError("Input PSD frequencies must include positive values")
@@ -42,7 +43,11 @@ def from_numpy_arrays(freq_data, noise_data, length, delta_f, low_freq_cutoff):
     freq_data = freq_data[data_start:]
     noise_data = noise_data[data_start:]
 
-    if (length - 1) * delta_f > freq_data[-1]:
+    # Odd-length FFT grids stop half a bin below Nyquist. Padding changes
+    # that endpoint; hold the last PSD value over the missing half-bin interval.
+    endpoint_tolerance = 0.5 * endpoint_spacing
+    endpoint_tolerance += 16 * np.finfo(float).eps * abs(freq_data[-1])
+    if (length - 1) * delta_f > freq_data[-1] + endpoint_tolerance:
         logger.warning(
             "Requested number of samples exceeds highest available PSD frequency; "
             "using max available frequency instead (requested %f Hz, available %f Hz)",

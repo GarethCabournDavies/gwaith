@@ -1,16 +1,17 @@
 """Plot estimated PSDs from saved PSD text files.
 
 This tool loads one or more PSD text files (e.g. produced by
-``hwilas_estimate_mojito_psd``) and produces a log-log plot of all channels
-on a single axis.
+``hwilas_estimate_psd``) and produces a log-log plot of all channels
+on a single axis. Input keys are legend labels, so multiple estimates of
+the same channel can be plotted together.
 
 Example::
 
-    python tools/plotting/plot_estimate_mojito_psd.py \
+    python tools/plotting/plot_psd.py \
         --psd-files LISA_A:output/A_mojito_SMOOTHED_PSD.txt \
                    LISA_E:output/E_mojito_SMOOTHED_PSD.txt \
                    LISA_T:output/T_mojito_SMOOTHED_PSD.txt \
-        --output-directory output
+        --output-file output/mojito_psd.png
 """
 
 import argparse
@@ -40,12 +41,12 @@ def load_arguments():
         required=True,
         action=KeyValueAction,
         nargs='+',
-        help="PSD input files, one per channel, given as channel:filename pairs"
+        help="PSD input files as label:filename pairs in plotting order (later curves draw on top); quote pairs when labels contain spaces"
     )
     parser.add_argument(
-        "--output-directory",
+        "--output-file",
         required=True,
-        help="Directory in which to save the plot"
+        help="Output plot filename"
     )
     parser.add_argument(
         "--f-min",
@@ -58,6 +59,15 @@ def load_arguments():
         type=float,
         default=0.1,
         help="Maximum frequency for the x-axis (Hz). Default: 0.1"
+    )
+
+    parser.add_argument(
+        "--y-min", type=float, default=None,
+        help="Minimum PSD value for the y-axis"
+    )
+    parser.add_argument(
+        "--y-max", type=float, default=None,
+        help="Maximum PSD value for the y-axis"
     )
 
     return parser.parse_args()
@@ -76,27 +86,26 @@ def main():
     init_logging(args.verbose)
     logger.info("Starting")
 
-    channels = list(args.psd_files.keys())
-    logger.debug("Channels: %s", channels)
-
-    os.makedirs(args.output_directory, exist_ok=True)
+    os.makedirs(os.path.dirname(os.path.abspath(args.output_file)), exist_ok=True)
 
     fig, ax = plt.subplots(figsize=(10, 6))
 
-    for channel in channels:
-        psd_path = args.psd_files[channel]
-        logger.info("Loading PSD for %s from %s", channel, psd_path)
+    # Draw in command-line order so later curves appear above earlier ones.
+    for label, psd_path in args.psd_files.items():
+        logger.info("Loading PSD labelled %s from %s", label, psd_path)
         freqs, psd_data = load_psd_data(psd_path)
-        ax.plot(freqs, psd_data, label=channel)
+        mask = (freqs > 0) & (psd_data > 0)
+        ax.plot(freqs[mask], psd_data[mask], label=label)
 
     ax.set_xscale('log')
     ax.set_yscale('log')
     ax.set_xlim(args.f_min, args.f_max)
+    ax.set_ylim(args.y_min, args.y_max)
     ax.set_xlabel('Frequency (Hz)')
     ax.set_ylabel('PSD')
     ax.legend(loc='upper left')
 
-    output_path = os.path.join(args.output_directory, "mojito_psd.png")
+    output_path = args.output_file
     fig.savefig(output_path, bbox_inches='tight')
     plt.close(fig)
     logger.info("Saved plot to %s", output_path)
