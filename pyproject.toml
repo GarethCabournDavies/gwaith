@@ -9,6 +9,7 @@ description = "Command-line tools for MBHB LISA searches"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "h5py",
 	"numpy",
 	"scipy",
 	"matplotlib",
@@ -30,6 +31,8 @@ test = [
 ]
 
 [project.scripts]
+hwilas_estimate_psd = "tools.psd_estimation.estimate_psd:main"
+hwilas_plot_psd = "tools.plotting.plot_psd:main"
 hwilas_coincidence = "tools.search.coincidence:main"
 hwilas_matched_filter_search = "tools.search.matched_filter_search:main"
 hwilas_optimise_snr_peaks = "tools.search.optimise_snr_peaks:main"
@@ -43,8 +46,6 @@ hwilas_optimal_snr = "tools.search.optimal_snr.optimal_snr_calculation:main"
 hwilas_plot_bank = "tools.template_banks.plot_mbhb_bank:main"
 hwilas_make_stochastic_bank = "tools.template_banks.make_stochastic_bank:main"
 hwilas_downsample_mojito = "tools.data_processing.downsample_mojito:main"
-hwilas_estimate_mojito_psd = "tools.psd_estimation.estimate_mojito_psd:main"
-hwilas_estimate_sangria_psd = "tools.psd_estimation.estimate_sangria_psd:main"
 hwilas_plot_sangria_waveforms = "tools.plotting.plot_sangria_waveforms:main"
 hwilas_plot_mojito_waveforms = "tools.plotting.plot_mojito_waveforms:main"
 hwilas_plot_optimise_waveforms = "tools.plotting.plot_optimise_waveforms:main"
@@ -55,18 +56,8 @@ hwilas_plot_waveform_match = "tools.plotting.plot_waveform_match:main"
 hwilas_plot_subtracted_signals = "tools.search.plot_subtracted_signals:main"
 hwilas_plot_downsampled_mojito = "tools.plotting.plot_downsampled_mojito:main"
 hwilas_plot_matched_filter_snr_timeseries = "tools.plotting.plot_matched_filter_snr_timeseries:main"
-hwilas_plot_estimate_mojito_psd = "tools.plotting.plot_estimate_mojito_psd:main"
 hwilas_plot_chunked_data = "tools.plotting.plot_chunked_data:main"
 hwilas_extract_truth = "tools.data_processing.extract_truth:main"
 
-[tool.setuptools]
-packages = [
-	"hwilas",
-	"tools",
-	"tools.search",
-	"tools.search.optimal_snr",
-	"tools.psd_estimation",
-	"tools.template_banks",
-	"tools.plotting",
-	"tools.diagnostics",
-]
+[tool.setuptools.packages.find]
+include = ["hwilas*", "tools*"]

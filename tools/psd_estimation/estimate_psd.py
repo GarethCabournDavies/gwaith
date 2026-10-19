@@ -1,4 +1,4 @@
-"""Estimate the PSD from processed mojito data.
+"""Estimate the PSD from processed data.
 
 Accepts one or more chunked-data HDF5 files. When multiple files are given,
 each channel is concatenated across all chunks before Welch's method is
@@ -22,25 +22,28 @@ logger = logging.getLogger(__name__)
 
 def load_arguments():
     parser = argparse.ArgumentParser(
-        description="Estimate the PSD from processed mojito data file."
+        description="Estimate the PSD from processed data file."
     )
     add_hwilas_common_options(parser)
     parser.add_argument(
         "--data-file",
         required=True,
         nargs="+",
-        help="Path(s) to the processed mojito HDF5 file(s) (output of "
-             "hwilas_process_mojito_data). When multiple files are given, all "
+        help="Path(s) to the processed HDF5 file(s) (output of "
+             "data processing). When multiple files are given, all "
              "chunks are concatenated per channel before Welch's method is "
              "applied, so the PSD estimate uses far more independent segments "
              "and is much smoother than estimating from a single chunk."
     )
     parser.add_argument(
         "--output-file",
-        required=True,
         nargs="+",
         action=KeyValueAction,
         help="Output files for each channel, given as channel:filename pairs"
+    )
+    parser.add_argument(
+        "--unsmoothed-output-file", nargs="+", action=KeyValueAction,
+        help="Optional unsmoothed PSD outputs as channel:filename pairs (same grid as smoothed outputs)",
     )
     parser.add_argument(
         "--segment-duration",
@@ -49,21 +52,22 @@ def load_arguments():
         help="Segment duration, in seconds, to use in Welch's method for PSD "
         "calculation. Default 1576800 (18.25 days)"
     )
-    parser.add_argument(
-        "--testing-plots",
-        help="Directory to store plots used for testing"
-    )
     add_smoothing_options(parser)
 
-    return parser.parse_args()
+    args = parser.parse_args()
+    if not args.output_file and not args.unsmoothed_output_file:
+        parser.error("Specify --output-file and/or --unsmoothed-output-file")
+    return args
 
 
 def main():
     args = load_arguments()
     init_logging(args.verbose)
-    logger.info("Starting PSD estimation from processed mojito data")
+    logger.info("Starting PSD estimation from processed data")
 
-    channels = list(args.output_file.keys())
+    output_files = args.output_file or {}
+    unsmoothed_output_files = args.unsmoothed_output_file or {}
+    channels = list(dict.fromkeys([*output_files, *unsmoothed_output_files]))
     logger.debug("Channels: %s", channels)
 
     # Load every data file, concatenating each channel across files so that the
@@ -72,7 +76,7 @@ def main():
     timeseries = {}
     data_files = args.data_file
     for i, data_file in enumerate(data_files):
-        logger.info("Loading processed mojito data %d/%d: %s",
+        logger.info("Loading processed data %d/%d: %s",
                     i + 1, len(data_files), data_file)
         with h5py.File(data_file, 'r') as f:
             epoch = float(f.attrs.get("epoch", 0.0))
@@ -131,54 +135,31 @@ def main():
         for channel in channels
     }
 
-    if args.smooth_regions:
+    unsmoothed_psds = psds
+
+    if args.smooth_regions and output_files:
         logger.info("Applying smoothing to PSDs")
 
         psds = smooth_psd(
             psds,
-            channels,
+            list(output_files),
             args.smooth_regions,
         )
 
     logger.info("Saving PSDs")
-    import os
-    for channel in channels:
-        output_path = args.output_file[channel]
+    for channel, output_path in output_files.items():
         logger.debug("Saving PSD for %s to %s", channel, output_path)
-        out_dir = os.path.dirname(output_path)
-        if out_dir:
-            os.makedirs(out_dir, exist_ok=True)
-        psds[channel].save(output_path)
+        # Downstream PSD readers expect frequency/PSD columns in plain text.
+        np.savetxt(output_path,
+                   np.column_stack((np.asarray(psds[channel].sample_frequencies),
+                                    np.asarray(psds[channel].data))),
+                   header="frequency_Hz PSD")
 
-    if args.testing_plots:
-        import os
-        os.makedirs(args.testing_plots, exist_ok=True)
-        from matplotlib import pyplot as plt
-        from matplotlib import use
-        use('Agg')
-
-        for channel in channels:
-            fig, ax = plt.subplots()
-            ax.loglog(
-                full_psds[channel].sample_frequencies[1:],
-                np.sqrt(full_psds[channel].data[1:])
-            )
-            ax.set_xlabel('Frequency (Hz)')
-            ax.set_ylabel('Strain Hz^{-1}')
-            ax.set_title(f'Raw PSD: {channel}')
-            fig.savefig(os.path.join(args.testing_plots, f'{channel}_raw_psd.png'))
-            plt.close(fig)
-
-            fig, ax = plt.subplots()
-            ax.loglog(
-                psds[channel].sample_frequencies,
-                np.sqrt(psds[channel].data)
-            )
-            ax.set_xlabel('Frequency (Hz)')
-            ax.set_ylabel('Strain (Hz^{-1/2})')
-            ax.set_title(f'Interpolated PSD: {channel}')
-            fig.savefig(os.path.join(args.testing_plots, f'{channel}_interp_psd.png'))
-            plt.close(fig)
+    for channel, output_path in unsmoothed_output_files.items():
+        raw = unsmoothed_psds[channel]
+        logger.debug("Saving unsmoothed %s PSD to %s", channel, output_path)
+        np.savetxt(output_path, np.column_stack((np.asarray(raw.sample_frequencies), raw.data)),
+                   header="frequency_Hz PSD_unsmoothed")
 
     logger.info("Done!")
 
