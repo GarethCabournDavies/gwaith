@@ -1,0 +1,6 @@
+site_name: Hwilas
+site_description: Hierarchical Wave Inspiral LISA Analysis & Search
+repo_url: https://github.com/uk-lisa-gs/hwilas
+docs_dir: docs
+exclude_docs: |
+  benchmarks/

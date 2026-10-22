@@ -2,8 +2,10 @@
   <img src="logo/hwilas_logo.png" alt="Hwilas logo" width="400">
 </div>
 
-[![Coverage](https://github.com/uk-lisa-gs/hwilas/actions/workflows/coverage.yml/badge.svg)](https://github.com/uk-lisa-gs/hwilas/actions/workflows/coverage.yml)
-[![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
+[![Python](https://img.shields.io/badge/python-3.12%2B-blue.svg)](pyproject.toml)
+[![Unit tests](https://github.com/uk-lisa-gs/hwilas/actions/workflows/test_suite.yml/badge.svg)](https://github.com/uk-lisa-gs/hwilas/actions/workflows/test_suite.yml)
+[![Documentation](https://github.com/uk-lisa-gs/hwilas/actions/workflows/docs.yml/badge.svg)](https://github.com/uk-lisa-gs/hwilas/actions/workflows/docs.yml)
+[![Coverage](https://codecov.io/gh/uk-lisa-gs/hwilas/graph/badge.svg)](https://codecov.io/gh/uk-lisa-gs/hwilas)
 [![License](https://img.shields.io/github/license/uk-lisa-gs/hwilas)](LICENSE)
 
 # Hwilas: Hierarchical Wave Inspiral LISA Analysis & Search
@@ -58,3 +60,29 @@ For Mojito preparation, search configuration and diagnostics, see
 
 To export a stable search event as MBHBS parameter/configuration YAML, see
 [the PE export command and current MBHBS capability limits](docs/mbhbs_pe_export.md).
+
+## CI and coverage
+
+GitHub Actions runs the unit tests and coverage on Python 3.12. The coverage
+workflow saves XML and HTML reports as the `coverage-reports` artifact and uploads
+the results to [Codecov](https://codecov.io/gh/uk-lisa-gs/hwilas).
+Enable this repository in Codecov and add its upload token as the `CODECOV_TOKEN`
+repository secret to populate the coverage percentage badge.
+
+If Git dependencies require private repository access, set `GH_DEPENDENCY_TOKEN`
+to a read-only token with access to those repositories. Otherwise CI uses the
+standard `GITHUB_TOKEN`, whose access is limited to this repository.
+
+To measure coverage locally after installing the test extras:
+
+```bash
+python -m pip install coverage
+python -m coverage run --source=hwilas,tools -m pytest tests
+python -m coverage report -m
+python -m coverage html
+```
+
+The documentation workflow builds the Markdown guides with MkDocs and saves the
+site as the `documentation` artifact; it does not publish a hosted site. Build it
+locally with `python -m pip install 'mkdocs>=1.6,<2'` followed by
+`python -m mkdocs build --site-dir /tmp/hwilas-docs`.

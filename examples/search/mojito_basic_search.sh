@@ -62,26 +62,26 @@ pids=()
 trigger_files=()
 for ((part=0; part<template_parallelization; part++)); do
     trigger_files+=("${search_dir}/matched_filter_AE_${part}.hdf")
-    # hwilas_matched_filter_search \
-    #     --input-data-file "$data_file" \
-    #     --bank-file "$bank_file" \
-    #     --channels LISA_A LISA_E \
-    #     --psd-files LISA_A:"$psd_file_a" LISA_E:"$psd_file_e" \
-    #     --approximant "$search_model" --orbits "$search_orbits" --data-time-origin "$data_time_origin" \
-    #     --tdi-generation "$tdi_generation" \
-    #     --padding-time 129600 \
-    #     --end-exclusion 259200 \
-    #     --f-upper 0.09 \
-    #     --statistic-threshold "$network_statistic_threshold" \
-    #     --template-fraction-range "${part}/${template_parallelization}" \
-    #     --output-file "${search_dir}/matched_filter_AE_${part}.hdf" \
-    #     --verbose &
-    # pids+=("$!")
+    hwilas_matched_filter_search \
+        --input-data-file "$data_file" \
+        --bank-file "$bank_file" \
+        --channels LISA_A LISA_E \
+        --psd-files LISA_A:"$psd_file_a" LISA_E:"$psd_file_e" \
+        --approximant "$search_model" --orbits "$search_orbits" --data-time-origin "$data_time_origin" \
+        --tdi-generation "$tdi_generation" \
+        --padding-time 129600 \
+        --end-exclusion 259200 \
+        --f-upper 0.09 \
+        --statistic-threshold "$network_statistic_threshold" \
+        --template-fraction-range "${part}/${template_parallelization}" \
+        --output-file "${search_dir}/matched_filter_AE_${part}.hdf" \
+        --verbose &
+    pids+=("$!")
 done
-# for pid in "${pids[@]}"; do
-#     wait "$pid" || status=1
-# done
-# [ "$status" -eq 0 ] || exit "$status"
+for pid in "${pids[@]}"; do
+    wait "$pid" || status=1
+done
+[ "$status" -eq 0 ] || exit "$status"
 
 hwilas_trigger_merge \
     --trigger-files "${trigger_files[@]}" \
@@ -112,42 +112,42 @@ optimise_dir="${OUTPUT_DIR}/round_0/optimise"
 subtract_dir="${OUTPUT_DIR}/round_0/subtract"
 mkdir -p "$optimise_dir" "$subtract_dir"
 
-# hwilas_optimise_snr_peaks \
-#     --approximant "$optimisation_model" \
-#     --refinement-approximant "$refinement_model" \
-#     --orbits "$optimisation_orbit" --refinement-orbits "$refinement_orbit" --data-time-origin "$data_time_origin" \
-#     --f-ref "$optimisation_f_ref" --refinement-f-ref "$refinement_f_ref" --mass-coordinate log \
-#     --refinement-generator-keywords response_nodes:4096 \
-#     --input-file "${candidate_dir}/candidates.hdf" \
-#     --bank-file "$bank_file" \
-#     --data-files "$data_file" \
-#     --psd-files LISA_A:"$psd_file_a" LISA_E:"$psd_file_e" LISA_T:"$psd_fit_t" \
-#     --fit-channels LISA_A LISA_E \
-#     --optimisation-channels LISA_A LISA_E \
-#     --output-timeseries-channels LISA_A LISA_E LISA_T \
-#     --output-timeseries-file "${optimise_dir}/optimise.hdf" \
-#     --output-parameter-file "${optimise_dir}/optimise_parameters.hdf" \
-#     --tdi-generation "$tdi_generation" \
-#     --statistic-threshold 40 \
-#     --minimum-peak-separation 259200 \
-#     --optimisation-window-before 86400 \
-#     --optimisation-window-after 14400 \
-#     --n-particles 32 \
-#     --n-iterations 100 \
-#     --n-processes "$n_processes" \
-#     --polish-evaluations 1000 \
-#     --seed 606 \
-#     --minimum-bounds \
-#         mchirp:5e4 eta:0.0826446281 spin1z:-0.99 spin2z:-0.99 \
-#         eclipticlongitude:0 eclipticlatitude:-1.57079632679 \
-#         inclination:0 polarization:0 \
-#     --maximum-bounds \
-#         mchirp:3e7 eta:0.25 spin1z:0.99 spin2z:0.99 \
-#         eclipticlongitude:6.28318530718 eclipticlatitude:1.57079632679 \
-#         inclination:3.14159265359 polarization:3.14159265359 \
-#     --bounds-window-relative-to-initial log_mchirp:0.65 tc:3600 \
-#     --f-lower 0.00003 \
-#     --verbose
+hwilas_optimise_snr_peaks \
+    --approximant "$optimisation_model" \
+    --refinement-approximant "$refinement_model" \
+    --orbits "$optimisation_orbit" --refinement-orbits "$refinement_orbit" --data-time-origin "$data_time_origin" \
+    --f-ref "$optimisation_f_ref" --refinement-f-ref "$refinement_f_ref" --mass-coordinate log \
+    --refinement-generator-keywords response_nodes:4096 \
+    --input-file "${candidate_dir}/candidates.hdf" \
+    --bank-file "$bank_file" \
+    --data-files "$data_file" \
+    --psd-files LISA_A:"$psd_file_a" LISA_E:"$psd_file_e" LISA_T:"$psd_fit_t" \
+    --fit-channels LISA_A LISA_E \
+    --optimisation-channels LISA_A LISA_E \
+    --output-timeseries-channels LISA_A LISA_E LISA_T \
+    --output-timeseries-file "${optimise_dir}/optimise.hdf" \
+    --output-parameter-file "${optimise_dir}/optimise_parameters.hdf" \
+    --tdi-generation "$tdi_generation" \
+    --statistic-threshold 40 \
+    --minimum-peak-separation 259200 \
+    --optimisation-window-before 86400 \
+    --optimisation-window-after 14400 \
+    --n-particles 32 \
+    --n-iterations 100 \
+    --n-processes "$n_processes" \
+    --polish-evaluations 1000 \
+    --seed 606 \
+    --minimum-bounds \
+        mchirp:5e4 eta:0.0826446281 spin1z:-0.99 spin2z:-0.99 \
+        eclipticlongitude:0 eclipticlatitude:-1.57079632679 \
+        inclination:0 polarization:0 \
+    --maximum-bounds \
+        mchirp:3e7 eta:0.25 spin1z:0.99 spin2z:0.99 \
+        eclipticlongitude:6.28318530718 eclipticlatitude:1.57079632679 \
+        inclination:3.14159265359 polarization:3.14159265359 \
+    --bounds-window-relative-to-initial log_mchirp:0.65 tc:3600 \
+    --f-lower 0.00003 \
+    --verbose
 
 hwilas_candidate_hdf_to_csv \
     --input-file "${optimise_dir}/optimise_parameters.hdf" \
@@ -184,26 +184,26 @@ pids=()
 trigger_files=()
 for ((part=0; part<template_parallelization; part++)); do
     trigger_files+=("${round1_search_dir}/matched_filter_AE_${part}.hdf")
-    # hwilas_matched_filter_search \
-    #     --input-data-file "${subtract_dir}/data_subtracted.hdf" \
-    #     --bank-file "$bank_file" \
-    #     --channels LISA_A LISA_E \
-    #     --psd-files LISA_A:"$psd_file_a" LISA_E:"$psd_file_e" \
-    #     --approximant "$search_model" --orbits "$search_orbits" --data-time-origin "$data_time_origin" \
-    #     --tdi-generation "$tdi_generation" \
-    #     --padding-time 129600 \
-    #     --end-exclusion 259200 \
-    #     --f-upper 0.09 \
-    #     --statistic-threshold "$network_statistic_threshold" \
-    #     --template-fraction-range "${part}/${template_parallelization}" \
-    #     --output-file "${round1_search_dir}/matched_filter_AE_${part}.hdf" \
-    #     --verbose &
-    # pids+=("$!")
+    hwilas_matched_filter_search \
+        --input-data-file "${subtract_dir}/data_subtracted.hdf" \
+        --bank-file "$bank_file" \
+        --channels LISA_A LISA_E \
+        --psd-files LISA_A:"$psd_file_a" LISA_E:"$psd_file_e" \
+        --approximant "$search_model" --orbits "$search_orbits" --data-time-origin "$data_time_origin" \
+        --tdi-generation "$tdi_generation" \
+        --padding-time 129600 \
+        --end-exclusion 259200 \
+        --f-upper 0.09 \
+        --statistic-threshold "$network_statistic_threshold" \
+        --template-fraction-range "${part}/${template_parallelization}" \
+        --output-file "${round1_search_dir}/matched_filter_AE_${part}.hdf" \
+        --verbose &
+    pids+=("$!")
 done
-# for pid in "${pids[@]}"; do
-#     wait "$pid" || status=1
-# done
-# [ "$status" -eq 0 ] || exit "$status"
+for pid in "${pids[@]}"; do
+    wait "$pid" || status=1
+done
+[ "$status" -eq 0 ] || exit "$status"
 
 hwilas_trigger_merge \
     --trigger-files "${trigger_files[@]}" \
@@ -245,43 +245,43 @@ hwilas_collect_search_candidates \
 round1_optimise_dir="${OUTPUT_DIR}/round_1/optimise"
 mkdir -p "$round1_optimise_dir"
 
-# hwilas_optimise_snr_peaks \
-#     --approximant "$optimisation_model" \
-#     --refinement-approximant "$refinement_model" \
-#     --orbits "$optimisation_orbit" --refinement-orbits "$refinement_orbit" --data-time-origin "$data_time_origin" \
-#     --f-ref "$optimisation_f_ref" --refinement-f-ref "$refinement_f_ref" --mass-coordinate log \
-#     --refinement-generator-keywords response_nodes:4096 \
-#     --input-file "${round1_candidate_dir}/candidates.hdf" \
-#     --bank-file "$bank_file" \
-#     --data-files "${subtract_dir}/data_subtracted.hdf" \
-#     --psd-files LISA_A:"$psd_file_a" LISA_E:"$psd_file_e" LISA_T:"$psd_fit_t" \
-#     --fit-channels LISA_A LISA_E \
-#     --optimisation-channels LISA_A LISA_E \
-#     --minimum-peak-separation 3600 \
-#     --output-timeseries-channels LISA_A LISA_E LISA_T \
-#     --output-timeseries-file "${round1_optimise_dir}/optimise.hdf" \
-#     --output-parameter-file "${round1_optimise_dir}/optimise_parameters.hdf" \
-#     --tdi-generation "$tdi_generation" \
-#     --statistic-threshold 20 \
-#     --previous-parameter-file "${optimise_dir}/optimise_parameters.hdf" \
-#     --optimisation-window-before 86400 \
-#     --optimisation-window-after 14400 \
-#     --n-particles 32 \
-#     --n-iterations 100 \
-#     --n-processes "$n_processes" \
-#     --polish-evaluations 1000 \
-#     --seed 607 \
-#     --minimum-bounds \
-#         mchirp:5e4 eta:0.0826446281 spin1z:-0.99 spin2z:-0.99 \
-#         eclipticlongitude:0 eclipticlatitude:-1.57079632679 \
-#         inclination:0 polarization:0 \
-#     --maximum-bounds \
-#         mchirp:3e7 eta:0.25 spin1z:0.99 spin2z:0.99 \
-#         eclipticlongitude:6.28318530718 eclipticlatitude:1.57079632679 \
-#         inclination:3.14159265359 polarization:3.14159265359 \
-#     --bounds-window-relative-to-initial log_mchirp:0.65 tc:3600 \
-#     --f-lower 0.00003 \
-#     --verbose
+hwilas_optimise_snr_peaks \
+    --approximant "$optimisation_model" \
+    --refinement-approximant "$refinement_model" \
+    --orbits "$optimisation_orbit" --refinement-orbits "$refinement_orbit" --data-time-origin "$data_time_origin" \
+    --f-ref "$optimisation_f_ref" --refinement-f-ref "$refinement_f_ref" --mass-coordinate log \
+    --refinement-generator-keywords response_nodes:4096 \
+    --input-file "${round1_candidate_dir}/candidates.hdf" \
+    --bank-file "$bank_file" \
+    --data-files "${subtract_dir}/data_subtracted.hdf" \
+    --psd-files LISA_A:"$psd_file_a" LISA_E:"$psd_file_e" LISA_T:"$psd_fit_t" \
+    --fit-channels LISA_A LISA_E \
+    --optimisation-channels LISA_A LISA_E \
+    --minimum-peak-separation 3600 \
+    --output-timeseries-channels LISA_A LISA_E LISA_T \
+    --output-timeseries-file "${round1_optimise_dir}/optimise.hdf" \
+    --output-parameter-file "${round1_optimise_dir}/optimise_parameters.hdf" \
+    --tdi-generation "$tdi_generation" \
+    --statistic-threshold 20 \
+    --previous-parameter-file "${optimise_dir}/optimise_parameters.hdf" \
+    --optimisation-window-before 86400 \
+    --optimisation-window-after 14400 \
+    --n-particles 32 \
+    --n-iterations 100 \
+    --n-processes "$n_processes" \
+    --polish-evaluations 1000 \
+    --seed 607 \
+    --minimum-bounds \
+        mchirp:5e4 eta:0.0826446281 spin1z:-0.99 spin2z:-0.99 \
+        eclipticlongitude:0 eclipticlatitude:-1.57079632679 \
+        inclination:0 polarization:0 \
+    --maximum-bounds \
+        mchirp:3e7 eta:0.25 spin1z:0.99 spin2z:0.99 \
+        eclipticlongitude:6.28318530718 eclipticlatitude:1.57079632679 \
+        inclination:3.14159265359 polarization:3.14159265359 \
+    --bounds-window-relative-to-initial log_mchirp:0.65 tc:3600 \
+    --f-lower 0.00003 \
+    --verbose
 
 hwilas_candidate_hdf_to_csv \
     --input-file "${round1_optimise_dir}/optimise_parameters.hdf" \
