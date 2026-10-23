@@ -1,11 +1,15 @@
 """Sky/helicity branch proposals preserve folded coordinates and optimiser state."""
 from types import SimpleNamespace
+import builtins
+import pytest
 import numpy as np
+import hwilas.search.sky_modes as sky_module
 from hwilas.search.sky_modes import sky_mode_vectors
 from tools.search import optimise_snr_peaks as module
 
 
 def test_64_branches_and_identity():
+    pytest.importorskip("gwreparam")
     p=np.array([5e5,.2,.1,0.,1.,.3,1.,.2,.1])
     for tc in [86400.,4e7]:
         branches=sky_mode_vectors(p,tc)
@@ -26,6 +30,7 @@ def test_singular_inclination_uses_sky_branches():
 
 
 def test_native_pso_sweep_updates_returned_personal_best(monkeypatch):
+    pytest.importorskip("gwreparam")
     p=np.array([5e5,.2,.1,0.,1.,.3,1.,.2,.1])
     tc=4e7
     target=sky_mode_vectors(p,tc)[20]
@@ -52,3 +57,45 @@ def test_de_sweeps_reinsert_winning_branch(monkeypatch):
     cost,best=module.optimise_population(args,np.zeros((5,9)),np.full(9,-1.),np.ones(9),dict(tc_reference=1.),0)
     assert cost==-10.
     np.testing.assert_allclose(best,target)
+
+
+@pytest.mark.parametrize("missing", ["gwreparam", "missing_transitive_dependency"])
+def test_optional_import_and_fallback(monkeypatch, caplog, missing):
+    original_import = builtins.__import__
+
+    def guarded_import(name, *args, **kwargs):
+        if name.startswith("gwreparam"):
+            raise ModuleNotFoundError(f"No module named {missing}", name=missing)
+        return original_import(name, *args, **kwargs)
+
+    sky_module._gwreparam_functions.cache_clear()
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+    p = np.array([5e5, .2, .1, 0., 1., .3, 1., .2, .1])
+    try:
+        if missing != "gwreparam":
+            with pytest.raises(ModuleNotFoundError, match=missing):
+                sky_mode_vectors(p, 4e7)
+            return
+        for tc in [86400., 4e7]:
+            branches = sky_mode_vectors(p, tc)
+            assert branches.shape == (8, 9)
+            assert np.isfinite(branches).all()
+            np.testing.assert_array_equal(branches[0], p)
+            np.testing.assert_array_equal(branches[:, :4], np.tile(p[:4], (8, 1)))
+            np.testing.assert_array_equal(branches[:, 8], np.full(8, p[8]))
+            assert len(np.unique(np.round(branches, 8), axis=0)) == 8
+            assert np.all((branches[:, 4] >= 0) & (branches[:, 4] < 2*np.pi))
+            assert np.all(abs(branches[:, 5]) <= np.pi/2)
+            assert np.all((branches[:, 7] >= 0) & (branches[:, 7] < np.pi))
+            np.testing.assert_allclose(branches[4:, 6], np.pi-p[6])
+        assert caplog.text.count("gwreparam is unavailable") == 1
+    finally:
+        sky_module._gwreparam_functions.cache_clear()
+
+
+def test_lisa_sky_reflection_and_rotations():
+    branches = sky_module.lisa_sky_branches(.4, .3, .2, .6)
+    np.testing.assert_allclose(branches[0], [.4, .3, .2, .6])
+    np.testing.assert_allclose(branches[1], [.4+np.pi/2, .3, .2+np.pi/2, .6])
+    np.testing.assert_allclose(branches[4], [.4, -.3, np.pi-.2, -.6])
+    np.testing.assert_allclose(branches[6], [.4+np.pi, -.3, np.pi-.2, -.6])

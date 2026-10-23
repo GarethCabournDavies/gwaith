@@ -55,6 +55,20 @@ pip install --user ".[test]"
 > but note that requires temporarily reverting the dependency URLs in
 > `pyproject.toml` back to `git+https://...`.
 
+Sky-mode sweeps use eight sky proposals without additional dependencies. For the
+full 64 sky/helicity branches, install the optional private `gwreparam` dependency
+when your GitHub account has access:
+
+```bash
+pip install 'gwreparam @ git+ssh://git@github.com/uk-lisa-gs/gwreparam.git'
+```
+
+The optimiser automatically uses the full exploration when `gwreparam` is
+installed. The eight-mode fallback preserves phase and explores sky reflections
+and rotations; it does not explore the additional helicity branches. These are
+candidate proposals evaluated with the waveform objective, not assumed exact
+waveform symmetries. Set `--sky-sweep-every 0` to disable sweeps.
+
 For Mojito preparation, search configuration and diagnostics, see
 [the search workflow](docs/mojito_search.md).
 
