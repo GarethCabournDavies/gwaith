@@ -6,6 +6,7 @@ on:
 
 permissions:
   contents: read
+  id-token: write
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -47,6 +48,7 @@ jobs:
         run: |
           python -m coverage report -m
           python -m coverage xml
+          python -m coverage lcov
           python -m coverage html
 
       - name: Save coverage reports
@@ -66,3 +68,10 @@ jobs:
           files: coverage.xml
           disable_search: true
           fail_ci_if_error: true
+
+      - name: Upload coverage to Qlty
+        if: ${{ !github.event.pull_request.head.repo.fork }}
+        uses: qltysh/qlty-action/coverage@v2
+        with:
+          oidc: true
+          files: coverage.lcov
