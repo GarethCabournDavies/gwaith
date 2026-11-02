@@ -34,10 +34,7 @@ jobs:
           python -m pip install -e .[dev]
 
       - name: Install Qlty CLI
-        run: curl -fsSL https://qlty.sh | bash
-
-      - name: Run Qlty
-        run: qlty check
+        uses: qltysh/qlty-action/install@v2
 
       - name: Run qlty and process SARIF
         run: |
