@@ -22,8 +22,11 @@ Hwilas (`/ˈʍiːlas/`, `wee-lass`) is the Cornish dialect word for search or se
 
 ## Installation
 
-Hwilas has two dependencies that are installed directly from git over **SSH**
-(`gwaith` and `tdispline`). This avoids the common headless-system failure where
+Hwilas installs `gwaith` directly from git over **SSH**. The optional `tdi`
+extra (`pip install -e '.[tdi]'`) also installs the private `tdispline`
+repository and requires access to it. The test extra does not install
+`tdispline`; tests requiring it skip when it is unavailable.
+SSH avoids the common headless-system failure where
 pip's HTTPS `git clone` falls back to a missing GUI credential helper (e.g.
 `/usr/libexec/openssh/gnome-ssh-askpass`) and aborts with:
 

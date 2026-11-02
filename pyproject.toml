@@ -18,7 +18,6 @@ dependencies = [
 	"matplotlib",
 	"gwaith @ git+ssh://git@github.com/uk-lisa-gs/gwaith.git",
     "mojito-processor @ git+https://github.com/OllieBurke/MojitoProcessor.git",
-    "tdispline @ git+ssh://git@github.com/uk-lisa-gs/tdi-spline.git",
     "phenomxpy==2.0.3",
     "lisaorbits",
     "lisa-data-challenge",
@@ -27,6 +26,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+
+tdi = [
+    "tdispline @ git+ssh://git@github.com/uk-lisa-gs/tdi-spline.git",
+]
 
 test = [
 	"pytest",
