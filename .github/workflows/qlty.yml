@@ -7,6 +7,9 @@ permissions:
   contents: read
   # This is required for uploading SARIF results
   security-events: write
+  # Required so the fallback step can post a PR comment. On fork PRs this
+  # token is read-only, so posting is skipped and we print to the log instead.
+  pull-requests: write
 
 jobs:
   lint:
