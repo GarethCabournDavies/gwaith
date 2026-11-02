@@ -37,7 +37,7 @@ jobs:
         run: python -m coverage xml -o coverage.xml
 
       - name: Upload coverage to Qlty
-        if: ${{ !github.event.pull_request.head.repo.fork }}
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         uses: qltysh/qlty-action/coverage@v2
         with:
           oidc: true
