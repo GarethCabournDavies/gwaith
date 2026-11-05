@@ -70,28 +70,60 @@ def _normalise_skip_rounds(stream_cfg: dict[str, Any]) -> set[int]:
     return {int(value) for value in raw}
 
 
+def _default_signal_output(options: dict[str, Any]) -> dict[str, Any]:
+    """Return the primary output of a signal stream (--output-signal)."""
+    return {
+        "id": "signal",
+        "arg": "output-signal",
+        "dataset_arg": "output-dataset",
+        "dataset": str(options.get("output-dataset", _DEFAULT_SIGNAL_DATASET)),
+        "kind": "signal",
+        "extension": "hdf",
+        "include_in_subtraction": True,
+    }
+
+
+def _default_noise_output(options: dict[str, Any]) -> dict[str, Any]:
+    """Return the primary output of the noise stream (--output)."""
+    return {
+        "id": "psd",
+        "arg": "output",
+        # output-dataset is passed through the noise options unchanged.
+        "dataset_arg": None,
+        "dataset": str(options.get("output-dataset") or _DEFAULT_PSD_DATASET),
+        "kind": "psd",
+        "extension": "hdf",
+        "include_in_subtraction": False,
+    }
+
+
 def _normalise_stream_outputs(
-    stream_cfg: dict[str, Any], options: dict[str, Any]
+    stream_cfg: dict[str, Any],
+    options: dict[str, Any],
+    primary: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Return normalised output artifact definitions for a stream.
 
-    The default output is the standard signal artifact written via
-    --output-signal/--output-dataset.
-    Additional outputs may be provided under stream output_files/output-files.
+    The first entry is the stream's primary output (by default the signal
+    artifact written via --output-signal/--output-dataset). Additional
+    outputs may be provided under output_files/output-files, each with:
+
+    ``id``
+        Name of the output, used in file names and by ``input_files``.
+    ``arg``
+        CLI flag (without ``--``) used to pass the output path.
+    ``dataset_arg`` / ``dataset``
+        Optional flag and value naming the dataset inside the file.
+    ``kind``
+        Logical role (default ``artifact``).
+    ``extension``
+        File extension (default ``hdf``).
+    ``include_in_subtraction``
+        Whether the file is subtracted from the data (default: kind == signal).
     """
-    outputs: list[dict[str, Any]] = [
-        {
-            "id": "signal",
-            "arg": "output-signal",
-            "dataset_arg": "output-dataset",
-            "dataset": str(
-                options.get("output-dataset", _DEFAULT_SIGNAL_DATASET)
-            ),
-            "kind": "signal",
-            "extension": "hdf",
-            "include_in_subtraction": True,
-        }
-    ]
+    if primary is None:
+        primary = _default_signal_output(options)
+    outputs: list[dict[str, Any]] = [primary]
 
     raw_outputs = stream_cfg.get("output_files", stream_cfg.get("output-files", []))
     if raw_outputs is None:
@@ -106,9 +138,11 @@ def _normalise_stream_outputs(
         output_id = _safe_name(
             raw_output.get("id") or raw_output.get("name") or f"output_{index}"
         )
-        if output_id == "signal":
-            # The primary signal output is always present and reserved.
+        if output_id == primary["id"]:
+            # The primary output is always present and reserved.
             continue
+        if any(existing["id"] == output_id for existing in outputs):
+            raise ValueError(f"Duplicate output_files id: {output_id}")
 
         arg_name = str(
             raw_output.get("arg")
@@ -145,6 +179,102 @@ def _normalise_stream_outputs(
     return outputs
 
 
+def _normalise_stream_inputs(stream_cfg: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return normalised input file definitions for a stream.
+
+    Inputs are given under input_files/input-files. Each entry is a mapping:
+
+    ``from``
+        ``<stream>`` or ``<stream>:<output_id>``. The node receives the most
+        recent file with that output id produced by the named stream (e.g.
+        ``noise:psd``). If ``output_id`` is omitted the stream's primary
+        output is used.
+    ``path``
+        A fixed file used every round, instead of ``from``.
+    ``arg``
+        CLI flag (without ``--``) used to pass the file path. Required.
+    ``dataset_arg`` / ``dataset``
+        Optional flag and value naming the dataset inside the file.
+    ``initial``
+        Fixed file used until ``from`` has produced anything.
+    ``required``
+        If true, fail when no file is available for a node (default false;
+        the argument is otherwise omitted for that node).
+    """
+    raw_inputs = stream_cfg.get("input_files", stream_cfg.get("input-files", []))
+    if raw_inputs is None:
+        raw_inputs = []
+    if not isinstance(raw_inputs, list):
+        raise ValueError("input_files must be a list")
+
+    inputs: list[dict[str, Any]] = []
+    for raw_input in raw_inputs:
+        if not isinstance(raw_input, dict):
+            raise ValueError("Each input_files entry must be a mapping")
+        arg_name = raw_input.get("arg") or raw_input.get("input-arg")
+        if not arg_name:
+            raise ValueError("Each input_files entry must define 'arg'")
+        source = raw_input.get("from")
+        path = raw_input.get("path")
+        if bool(source) == bool(path):
+            raise ValueError(
+                f"input_files entry '{arg_name}' must define exactly one of "
+                "'from' or 'path'"
+            )
+        source_stream = source_output = None
+        if source:
+            source_stream, _, source_output = str(source).partition(":")
+            source_stream = _safe_name(source_stream)
+            source_output = _safe_name(source_output) if source_output else None
+        dataset_arg = raw_input.get("dataset_arg", raw_input.get("dataset-arg"))
+        dataset_value = raw_input.get("dataset")
+        initial = raw_input.get("initial")
+        inputs.append(
+            {
+                "arg": str(arg_name).lstrip("-"),
+                "source_stream": source_stream,
+                "source_output": source_output,
+                "path": _as_path(path) if path else None,
+                "initial": _as_path(initial) if initial else None,
+                "dataset_arg": str(dataset_arg).lstrip("-") if dataset_arg else None,
+                "dataset": str(dataset_value) if dataset_value is not None else None,
+                "required": bool(raw_input.get("required", False)),
+            }
+        )
+    return inputs
+
+
+_GLOBAL_INPUT_STREAM = "inputs"
+
+
+def _normalise_global_inputs(workflow_cfg: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Return named analysis-level input files from workflow.input_files.
+
+    Accepts a mapping of ``name: path`` or ``name: {path, dataset}``. Streams
+    reference these with ``input_files: [{from: inputs:<name>, arg: ...}]``.
+    """
+    raw = workflow_cfg.get("input_files", workflow_cfg.get("input-files", {}))
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ValueError("workflow.input_files must be a mapping of name to path")
+    inputs: dict[str, dict[str, Any]] = {}
+    for raw_name, value in raw.items():
+        name = _safe_name(raw_name)
+        if isinstance(value, dict):
+            path = value.get("path")
+            dataset = value.get("dataset")
+        else:
+            path, dataset = value, None
+        if not path:
+            raise ValueError(f"workflow.input_files '{raw_name}' needs a path")
+        inputs[name] = {
+            "path": _as_path(path),
+            "dataset": str(dataset) if dataset is not None else None,
+        }
+    return inputs
+
+
 def _stream_runs_on_round(stream_cfg: dict[str, Any], round_index: int) -> bool:
     if round_index in stream_cfg["skip_rounds"]:
         return False
@@ -179,6 +309,32 @@ def _data_file_args(input_file: GwaithFile) -> list[str]:
             input_file.local_path,
         ]
     return ["--timeseries-file", input_file.local_path]
+
+
+def _output_file_args(output_cfg: dict[str, Any], output_path: str) -> list[str]:
+    """Return the CLI args used to pass an output file to a tool."""
+    args = [f"--{output_cfg['arg']}", output_path]
+    dataset_arg = output_cfg.get("dataset_arg")
+    dataset_value = output_cfg.get("dataset")
+    if dataset_arg and dataset_value:
+        args.extend([f"--{dataset_arg}", dataset_value])
+    return args
+
+
+def _latest_output_uid(
+    outputs_by_round: dict[int, dict[str, str]],
+    output_id: str,
+    max_round_inclusive: int,
+) -> str | None:
+    """Return the most recent file uid for ``output_id`` up to a round."""
+    candidates = [
+        round_index
+        for round_index, outputs in outputs_by_round.items()
+        if round_index <= max_round_inclusive and output_id in outputs
+    ]
+    if not candidates:
+        return None
+    return outputs_by_round[max(candidates)][output_id]
 
 
 def _build_cli_args(
@@ -286,6 +442,7 @@ def _parse_config(
         else {}
     )
     noise_cfg = data.get("noise", {}) if isinstance(data.get("noise", {}), dict) else {}
+    noise_options = dict(noise_cfg.get("options", {}) or {})
 
     signal_streams: list[dict[str, Any]] = []
     for section_name, section_cfg in data.items():
@@ -308,12 +465,15 @@ def _parse_config(
                 "resources": dict(section_cfg.get("resources", {}) or {}),
                 "options": options,
                 "outputs": _normalise_stream_outputs(section_cfg, options),
+                "inputs": _normalise_stream_inputs(section_cfg),
                 "initial_prior": options.get("prior-file")
                 or options.get("priors")
                 or options.get("init-params"),
             }
         )
 
+    if any(stream["uid"] == _GLOBAL_INPUT_STREAM for stream in signal_streams):
+        raise ValueError(f"'{_GLOBAL_INPUT_STREAM}' is reserved and cannot be a stream")
     if not signal_streams:
         raise ValueError(
             "At least one signal stream must be defined in the parsed config"
@@ -326,6 +486,7 @@ def _parse_config(
         "input_file": _as_path(input_file) if input_file else None,
         "input_dataset": input_dataset,
         "global_retention_level": workflow_cfg.get("global-retention-level"),
+        "global_inputs": _normalise_global_inputs(workflow_cfg),
         "signal_streams": signal_streams,
         "subtraction": {
             "executable": str(
@@ -337,12 +498,12 @@ def _parse_config(
         "noise": {
             "enabled": "noise" in executables,
             "executable": str(executables.get("noise", "gwaith_estimate_psd")),
-            "options": dict(noise_cfg.get("options", {}) or {}),
+            "options": noise_options,
             "resources": dict(noise_cfg.get("resources", {}) or {}),
-            "output_dataset": str(
-                noise_cfg.get("options", {}).get("output-dataset")
-                or _DEFAULT_PSD_DATASET
+            "outputs": _normalise_stream_outputs(
+                noise_cfg, noise_options, primary=_default_noise_output(noise_options)
             ),
+            "inputs": _normalise_stream_inputs(noise_cfg),
         },
     }
 
@@ -428,6 +589,133 @@ def build_workflow_graph(
             register_file(files, prior_file)
             initial_prior_by_stream[stream_uid] = prior_uid
 
+    # Every output produced by every stream, keyed by stream, round and output id
+    outputs_by_stream_round: dict[str, dict[int, dict[str, str]]] = {
+        stream_uid: {} for stream_uid in streams
+    }
+    primary_output_by_stream: dict[str, str] = {
+        stream_cfg["uid"]: stream_cfg["outputs"][0]["id"]
+        for stream_cfg in cfg["signal_streams"]
+    }
+    output_ids_by_stream: dict[str, set[str]] = {
+        stream_cfg["uid"]: {o["id"] for o in stream_cfg["outputs"]}
+        for stream_cfg in cfg["signal_streams"]
+    }
+    global_input_uids: dict[str, str] = {}
+    for name, global_input in cfg["global_inputs"].items():
+        uid = make_file_uid(_GLOBAL_INPUT_STREAM, None, name)
+        register_file(
+            files,
+            GwaithFile(
+                uid=uid,
+                local_path=global_input["path"],
+                final_path=global_input["path"],
+                dataset=global_input["dataset"],
+                kind="input_file",
+                round_index=None,
+                stream_uid=_GLOBAL_INPUT_STREAM,
+                retention_level=cfg["global_retention_level"],
+            ),
+        )
+        global_input_uids[name] = uid
+    output_ids_by_stream[_GLOBAL_INPUT_STREAM] = set(global_input_uids)
+
+    if cfg["noise"]["enabled"]:
+        primary_output_by_stream["noise"] = cfg["noise"]["outputs"][0]["id"]
+        output_ids_by_stream["noise"] = {o["id"] for o in cfg["noise"]["outputs"]}
+
+    consumers = [(s_cfg["uid"], s_cfg["inputs"]) for s_cfg in cfg["signal_streams"]]
+    if cfg["noise"]["enabled"]:
+        consumers.append(("noise", cfg["noise"]["inputs"]))
+    for consumer_uid, inputs in consumers:
+        for input_cfg in inputs:
+            source = input_cfg["source_stream"]
+            if source is None:
+                continue
+            if source not in output_ids_by_stream:
+                raise ValueError(
+                    f"input_files for {consumer_uid} references unknown stream "
+                    f"'{source}'"
+                )
+            if input_cfg["source_output"] is None:
+                if source == _GLOBAL_INPUT_STREAM:
+                    raise ValueError(
+                        f"input_files for {consumer_uid} must name a file, e.g. "
+                        f"'{_GLOBAL_INPUT_STREAM}:orbits'"
+                    )
+                input_cfg["source_output"] = primary_output_by_stream[source]
+            if input_cfg["source_output"] not in output_ids_by_stream[source]:
+                raise ValueError(
+                    f"input_files for {consumer_uid} references unknown output "
+                    f"'{input_cfg['source_output']}' of stream '{source}'"
+                )
+
+    def _fixed_input_uid(consumer_uid: str, label: str, path: str) -> str:
+        uid = make_file_uid(consumer_uid, None, label)
+        if uid not in files:
+            register_file(
+                files,
+                GwaithFile(
+                    uid=uid,
+                    local_path=path,
+                    final_path=path,
+                    kind="input_file",
+                    round_index=None,
+                    stream_uid=consumer_uid,
+                    retention_level=cfg["global_retention_level"],
+                ),
+            )
+        return uid
+
+    def _resolve_inputs(
+        consumer_uid: str, inputs: list[dict[str, Any]], round_index: int
+    ) -> tuple[list[str], list[str]]:
+        """Return (CLI args, used file uids) for a node's input_files.
+
+        Fit nodes see outputs from earlier rounds only, since all fits in a
+        round run in parallel and before the noise node. The noise node also
+        sees signal-stream outputs from its own round.
+        """
+        args: list[str] = []
+        uses: list[str] = []
+        for input_cfg in inputs:
+            file_uid = None
+            source = input_cfg["source_stream"]
+            dataset = input_cfg["dataset"]
+            if source == _GLOBAL_INPUT_STREAM:
+                file_uid = global_input_uids[input_cfg["source_output"]]
+                dataset = dataset or files[file_uid].dataset
+            elif source is None:
+                file_uid = _fixed_input_uid(
+                    consumer_uid, f"input_{input_cfg['arg']}", input_cfg["path"]
+                )
+            else:
+                same_round = consumer_uid == "noise" and source != "noise"
+                max_round = round_index if same_round else round_index - 1
+                file_uid = _latest_output_uid(
+                    outputs_by_stream_round[source],
+                    input_cfg["source_output"],
+                    max_round,
+                )
+                if file_uid is None and input_cfg["initial"]:
+                    file_uid = _fixed_input_uid(
+                        consumer_uid,
+                        f"initial_{input_cfg['arg']}",
+                        input_cfg["initial"],
+                    )
+            if file_uid is None:
+                if input_cfg["required"]:
+                    raise ValueError(
+                        f"No file available for --{input_cfg['arg']} of "
+                        f"{consumer_uid} in round {round_index}; set 'initial'"
+                    )
+                continue
+            uses.append(file_uid)
+            args.extend([f"--{input_cfg['arg']}", files[file_uid].local_path])
+            if input_cfg["dataset_arg"] and dataset:
+                args.extend([f"--{input_cfg['dataset_arg']}", dataset])
+        return args, uses
+
     round_entries: list[dict[str, Any]] = []
     latest_params_by_stream: dict[str, str | None] = {
         stream_cfg["uid"]: initial_prior_by_stream[stream_cfg["uid"]]
@@ -486,7 +774,13 @@ def build_workflow_graph(
                     / f"{round_tag}_{stream_uid}_{output_cfg['id']}.{output_cfg['extension']}"
                 )
 
+            extra_input_args, extra_input_uids = _resolve_inputs(
+                stream_uid, stream_cfg["inputs"], round_index
+            )
+            fit_node.uses.extend(extra_input_uids)
+
             command = [stream_cfg["executable"], *_data_file_args(input_file)]
+            command.extend(extra_input_args)
             if prior_uid:
                 command.extend(["--priors", files[prior_uid].local_path])
             command.extend(
@@ -501,13 +795,9 @@ def build_workflow_graph(
                 )
             )
             for output_cfg in stream_outputs:
-                output_arg = f"--{output_cfg['arg']}"
-                output_path = output_paths[output_cfg["id"]]
-                command.extend([output_arg, output_path])
-                dataset_arg = output_cfg.get("dataset_arg")
-                dataset_value = output_cfg.get("dataset")
-                if dataset_arg and dataset_value:
-                    command.extend([f"--{dataset_arg}", dataset_value])
+                command.extend(
+                    _output_file_args(output_cfg, output_paths[output_cfg["id"]])
+                )
             command.extend(["--output-params", likelihood_path])
             fit_node.command = command
 
@@ -531,6 +821,9 @@ def build_workflow_graph(
                 )
                 register_file(files, output_file)
                 produced_output_uids.append(output_uid)
+                outputs_by_stream_round[stream_uid].setdefault(round_index, {})[
+                    output_id
+                ] = output_uid
                 if output_cfg.get("include_in_subtraction", False):
                     subtractable_output_uids.append(output_uid)
 
@@ -594,7 +887,11 @@ def build_workflow_graph(
             residual_command.extend(_build_cli_args(cfg["subtraction"]["options"]))
             residual_command.extend(["--output", residual_path])
         else:
-            residual_command = ["cp", files[original_data_uid].local_path, residual_path]
+            residual_command = [
+                "cp",
+                files[original_data_uid].local_path,
+                residual_path,
+            ]
         residual_node.command = residual_command
         residual_file = GwaithFile(
             uid=residual_uid,
@@ -615,8 +912,6 @@ def build_workflow_graph(
 
         noise_node_uid: str | None = None
         if cfg["noise"]["enabled"]:
-            noise_uid = make_file_uid("noise", round_index, "psd")
-            noise_path = str(round_dir / f"{round_tag}_noise.hdf")
             noise_node_uid = make_node_uid("noise", round_index, "estimate_psd")
             noise_node = GwaithNode(
                 uid=noise_node_uid,
@@ -625,31 +920,51 @@ def build_workflow_graph(
                 name=f"noise_{round_tag}",
                 resources=cfg["noise"]["resources"],
             )
+            extra_input_args, extra_input_uids = _resolve_inputs(
+                "noise", cfg["noise"]["inputs"], round_index
+            )
             noise_node.uses.append(residual_uid)
+            noise_node.uses.extend(extra_input_uids)
             noise_node.command = [
                 cfg["noise"]["executable"],
                 "--data",
                 residual_path,
+                *extra_input_args,
             ]
             noise_node.command.extend(_build_cli_args(cfg["noise"]["options"]))
-            noise_node.command.extend(["--output", noise_path])
 
-            noise_file = GwaithFile(
-                uid=noise_uid,
-                local_path=noise_path,
-                final_path=noise_path,
-                produced_by=noise_node_uid,
-                retention_level=cfg["global_retention_level"],
-                dataset=cfg["noise"]["output_dataset"],
-                kind="psd",
-                round_index=round_index,
-                stream_uid="noise",
-            )
-            register_file(files, noise_file)
-            noise_node.produces.append(noise_uid)
+            for index, output_cfg in enumerate(cfg["noise"]["outputs"]):
+                output_id = output_cfg["id"]
+                # Keep the historical file name for the primary PSD output.
+                suffix = "noise" if index == 0 else f"noise_{output_id}"
+                output_path = str(
+                    round_dir / f"{round_tag}_{suffix}.{output_cfg['extension']}"
+                )
+                output_uid = make_file_uid("noise", round_index, output_id)
+                noise_node.command.extend(_output_file_args(output_cfg, output_path))
+                register_file(
+                    files,
+                    GwaithFile(
+                        uid=output_uid,
+                        local_path=output_path,
+                        final_path=output_path,
+                        produced_by=noise_node_uid,
+                        retention_level=cfg["global_retention_level"],
+                        dataset=output_cfg.get("dataset"),
+                        kind=output_cfg.get("kind", "artifact"),
+                        round_index=round_index,
+                        stream_uid="noise",
+                    ),
+                )
+                noise_node.produces.append(output_uid)
+                outputs_by_stream_round["noise"].setdefault(round_index, {})[
+                    output_id
+                ] = output_uid
+                if index == 0:
+                    final_noise_uid = output_uid
+
             register_node(nodes, files, noise_node)
             streams["noise"].nodes.append(noise_node_uid)
-            final_noise_uid = noise_uid
 
         if round_index + 1 < cfg["rounds"]:
             next_round_dir = target_dir / _round_tag(round_index + 1)
@@ -703,7 +1018,11 @@ def build_workflow_graph(
                     prep_command.extend(_build_cli_args(cfg["subtraction"]["options"]))
                     prep_command.extend(["--output", next_data_path])
                 else:
-                    prep_command = ["cp", files[original_data_uid].local_path, next_data_path]
+                    prep_command = [
+                        "cp",
+                        files[original_data_uid].local_path,
+                        next_data_path,
+                    ]
                 prep_node.command = prep_command
 
                 next_data_file = GwaithFile(
